@@ -31,10 +31,17 @@ struct ContentView: View {
 
     private var keyEntry: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Add your OpenAI key").font(.headline)
+            Text(Config.proxyBaseURL != nil ? "Add your team token" : "Add your OpenAI key").font(.headline)
             Text("Stored securely in your Keychain.").font(.caption).foregroundStyle(.secondary)
             KeyField()
-            Link("Get a key →", destination: URL(string: "https://platform.openai.com/api-keys")!).font(.caption)
+            if model.keyStatus == .rejected {
+                Text("✗ token not recognized — check it and try again").font(.caption).foregroundStyle(.red)
+            }
+            if Config.proxyBaseURL == nil {
+                Link("Get a key →", destination: URL(string: "https://platform.openai.com/api-keys")!).font(.caption)
+            } else {
+                Text("Ask your team admin for your token.").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -159,11 +166,48 @@ struct ContentView: View {
 struct KeyField: View {
     @EnvironmentObject var model: AppModel
     @State private var text = ""
+    var onSaved: (() -> Void)? = nil
+    private var usesProxy: Bool { Config.proxyBaseURL != nil }
+    private var checking: Bool { model.keyStatus == .checking }
     var body: some View {
         HStack {
-            SecureField("sk-…", text: $text).textFieldStyle(.roundedBorder)
-            Button("Save") { model.saveKey(text); text = "" }
-                .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
+            SecureField(usesProxy ? "team token" : "sk-…", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+            Button(checking ? "Saving…" : "Save", action: save)
+                .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty || checking)
+        }
+    }
+    private func save() {
+        let value = text
+        Task {
+            if await model.saveAndVerifyKey(value) {
+                text = ""
+                onSaved?()
+            }
+        }
+    }
+}
+
+/// One-line status for the stored key/token (fingerprint + verification state).
+struct KeyStatusLabel: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        switch model.keyStatus {
+        case .checking:
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("verifying…").foregroundStyle(.secondary) }
+        case .rejected:
+            Text("✗ token not recognized").foregroundStyle(.red)
+        case .verified:
+            Text("✓ verified").foregroundStyle(.green)
+        case .savedUnverified:
+            Text("saved — couldn't verify (offline?)").foregroundStyle(.secondary)
+        case .idle:
+            if let fp = model.keyFingerprint {
+                Text("•••• \(fp) stored").foregroundStyle(.secondary)
+            } else {
+                Text("not set").foregroundStyle(.secondary)
+            }
         }
     }
 }

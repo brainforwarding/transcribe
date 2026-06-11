@@ -79,6 +79,63 @@ final class AppModel: ObservableObject {
         hasKey = true
     }
 
+    // Last 4 chars of the stored secret — a fingerprint so the user can tell which
+    // token/key is stored without revealing it.
+    var keyFingerprint: String? {
+        guard let k = Keychain.get(), k.count >= 4 else { return nil }
+        return String(k.suffix(4))
+    }
+
+    enum KeyStatus: Equatable { case idle, checking, verified, rejected, savedUnverified }
+    @Published var keyStatus: KeyStatus = .idle
+
+    /// Save the key, then (in proxy mode) verify it against the Worker.
+    /// Returns true if the field should collapse (saved & accepted, or saved but offline);
+    /// false if the token was rejected and the user should fix it.
+    @MainActor
+    func saveAndVerifyKey(_ key: String) async -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        Keychain.set(trimmed)
+        hasKey = true
+        guard Config.proxyBaseURL != nil else { keyStatus = .verified; return true }
+        keyStatus = .checking
+        switch await verifyToken(trimmed) {
+        case .accepted: keyStatus = .verified; settleKeyStatus(); return true
+        case .rejected: keyStatus = .rejected; return false
+        case .unreachable: keyStatus = .savedUnverified; settleKeyStatus(); return true
+        }
+    }
+
+    // After a brief confirmation, settle back to showing the fingerprint.
+    private func settleKeyStatus() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if keyStatus == .verified || keyStatus == .savedUnverified { keyStatus = .idle }
+        }
+    }
+
+    private enum VerifyResult { case accepted, rejected, unreachable }
+
+    // Probe the proxy: a recognized token passes auth (→ 403 "model not allowed" on a
+    // bogus model); an unrecognized one gets 401. Network failure → unreachable.
+    private func verifyToken(_ token: String) async -> VerifyResult {
+        guard let base = Config.proxyBaseURL else { return .accepted }
+        var req = URLRequest(url: base.appendingPathComponent("chat/completions"))
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = #"{"model":"__verify__"}"#.data(using: .utf8)
+        req.timeoutInterval = 10
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            return code == 401 ? .rejected : .accepted
+        } catch {
+            return .unreachable
+        }
+    }
+
     func acceptConsent() {
         consentAccepted = true
         UserDefaults.standard.set(true, forKey: "consentAccepted")
@@ -212,13 +269,12 @@ final class AppModel: ObservableObject {
     private func promptForTitle() -> String? {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Name this recording?"
-        alert.informativeText = "Optional — names the file and the transcript heading. Leave empty to keep the timestamp."
+        alert.messageText = "Name this recording"
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Skip")
         alert.buttons[1].keyEquivalent = "\u{1b}"   // Escape skips
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 230, height: 24))
-        field.placeholderString = "e.g. Weekly sync"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.placeholderString = "Optional name"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }

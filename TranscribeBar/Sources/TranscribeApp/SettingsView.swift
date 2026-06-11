@@ -20,22 +20,18 @@ struct SettingsView: View {
 
             Divider()
 
-            row("OpenAI key") {
-                Text(model.hasKey ? "•••• stored" : "not set").foregroundStyle(.secondary)
+            row(Config.proxyBaseURL != nil ? "Team token" : "OpenAI key") {
+                KeyStatusLabel()
                 Spacer()
-                Button(replacingKey ? "Cancel" : "Replace…") { replacingKey.toggle() }
+                Button(replacingKey ? "Cancel" : "Replace…") {
+                    replacingKey.toggle()
+                    model.keyStatus = .idle
+                }
             }
-            if replacingKey { KeyField() }
+            if replacingKey { KeyField(onSaved: { replacingKey = false }) }
 
-            Divider()
-
-            if model.micOnly {
-                Text("Mic only is on — recordings capture just your microphone (voice notes, thinking out loud). Turn it off in the menu to record meetings again.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Tip: use a headset — speakers cause echo on both tracks.")
-                    .font(.caption).foregroundStyle(.secondary)
+            if !model.micOnly {
+                Divider()
                 Text("⚠︎ Recording captures everyone in the call. Inform participants and get their consent — it's legally required in some places.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -1,11 +1,13 @@
-# Transcribe proxy (optional — shared-key SSO)
+# Transcribe proxy (shared-key, team tokens)
 
 This Cloudflare Worker holds the **shared org OpenAI key** so it never ships on coworkers'
-machines. Coworkers sign in with company SSO (Cloudflare Access); the Worker injects the
-key. **Optional:** the app works today with a per-user key pasted into the Keychain — deploy
-this only when you want company-paid, no-per-user-setup billing.
+machines. Each team member gets a **personal token**; they paste it into the app exactly
+where an OpenAI key would go, and the Worker swaps it for the org key server-side. Revoking
+a person = removing their token. **Optional:** the app also works with a per-user OpenAI
+key (set `Config.proxyBaseURL = nil` and rebuild).
 
-## Deploy (~20 min, one-time)
+## Deploy (~10 min, one-time)
+
 1. Install wrangler + log in:
    ```bash
    npm i -g wrangler
@@ -16,30 +18,42 @@ this only when you want company-paid, no-per-user-setup billing.
    cd proxy
    wrangler kv namespace create RATE
    ```
-   Paste the returned `id` into `wrangler.toml` under `[[kv_namespaces]]` (uncomment it).
-3. Store the org key (encrypted, never in the repo):
+   Paste the returned `id` into `wrangler.toml` under `[[kv_namespaces]]`.
+3. Deploy, then store the secrets (encrypted, never in the repo):
    ```bash
+   wrangler deploy                        # note the resulting workers.dev URL
    wrangler secret put OPENAI_API_KEY     # paste your sk-… when prompted
+   wrangler secret put TEAM_TOKENS        # "name:token,name:token" — see below
    ```
-4. Deploy:
-   ```bash
-   wrangler deploy
-   ```
-   Note the resulting URL, e.g. `https://transcribe-proxy.<you>.workers.dev`.
-5. **Put it behind Cloudflare Access** (Zero Trust dashboard → Access → Applications →
-   Self-hosted): set the app domain to the Worker URL, add an **identity provider** (Google
-   Workspace / GitHub / Okta) and a policy *Allow: emails ending in @yourcompany.com*. Access
-   then injects `Cf-Access-Authenticated-User-Email`, which the Worker rate-limits on.
+4. Point the app at the Worker: set `Config.proxyBaseURL` in
+   `TranscribeBar/Sources/TranscribeApp/Config.swift` to `https://<worker-url>/v1` and rebuild.
 
-## Operate
-- **Add/remove a user:** edit the Access policy (or the email list). Removing a user revokes
-  access on their next request.
-- **Rotate the key:** `wrangler secret put OPENAI_API_KEY` (takes effect in seconds).
-- **Cost backstop:** also set a hard spending limit on the OpenAI org, and apply for
+## Team tokens
+
+Generate one random token per person and join them as `name:token,name:token`:
+
+```bash
+openssl rand -hex 16        # one per person
+```
+
+Keep the human-readable list in `proxy/TEAM_TOKENS.local` (gitignored). Each person pastes
+*their token* into the app's key field (⚙ → Replace key). The name is only used for
+per-person rate-limiting.
+
+- **Add/rename/remove a person:** edit the list, re-run `wrangler secret put TEAM_TOKENS`
+  with the new combined value (takes effect in seconds, no redeploy).
+- **Rotate the org key:** `wrangler secret put OPENAI_API_KEY`.
+- **Cost backstop:** set a hard spending limit on the OpenAI org, and apply for
   **Zero-Data-Retention (ZDR)** so audio isn't retained.
 
-## Point the app at it
-In the app, set the proxy base URL (build constant `ProxyBaseURL` in `Config.swift`) to your
-Worker URL and switch auth to the Access SSO flow. Until then the app uses the per-user
-Keychain key against `api.openai.com` directly. The Worker never logs audio and only
-forwards `POST /v1/audio/transcriptions` (whisper-1) and `POST /v1/chat/completions` (gpt-4o).
+## What the Worker enforces
+
+- Exactly two endpoints (`/v1/audio/transcriptions`, `/v1/chat/completions`); everything else 403.
+- All inbound headers stripped; the org key is injected server-side only.
+- Chat models allowlisted (`gpt-4o`, `gpt-4o-mini`); 25 MiB body cap.
+- Per-person hourly rate limit (`RATE_PER_HOUR`, default 120) keyed by the token owner.
+- Constant-time token comparison; audio bodies are streamed, never read or logged; errors
+  are sanitized — neither the key nor tokens are ever echoed.
+
+> The previous Cloudflare Access (SSO) variant lives in git history; team tokens replaced it
+> because the app-side SSO sign-in flow was never built and tokens require zero app changes.

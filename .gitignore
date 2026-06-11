@@ -19,3 +19,5 @@ TranscribeBar/.build/
 
 # Assembled app bundle / build output
 TranscribeBar/build/
+proxy/*.local
+proxy/.wrangler/

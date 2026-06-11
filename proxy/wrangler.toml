@@ -2,15 +2,14 @@ name = "transcribe-proxy"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
-# Per-user hourly rate-limit store. Create with:
-#   wrangler kv namespace create RATE
-# then paste the returned id below.
-# [[kv_namespaces]]
-# binding = "RATE"
-# id = "REPLACE_WITH_KV_ID"
+# Per-person hourly rate-limit store.
+[[kv_namespaces]]
+binding = "RATE"
+id = "735edfa6a28f42c1bbac799e6d818015"
 
 [vars]
 RATE_PER_HOUR = "120"
 
-# The OpenAI org key is a SECRET (never in this file):
-#   wrangler secret put OPENAI_API_KEY
+# Secrets (never in this file):
+#   wrangler secret put OPENAI_API_KEY   # the shared org key
+#   wrangler secret put TEAM_TOKENS      # "name:token,name:token" — one per person
