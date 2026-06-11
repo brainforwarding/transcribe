@@ -1,0 +1,17 @@
+# .NET build output
+bin/
+obj/
+publish/
+
+# Single-file publish staging / release zips
+*.zip
+
+# Rider / VS user state
+.vs/
+.idea/
+*.user
+*.suo
+
+# Test results
+TestResults/
+[Tt]est[Rr]esult*/

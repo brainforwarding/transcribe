@@ -1,0 +1,101 @@
+name: Windows build
+
+# Build/test on every push that touches the Windows app, and on win-v* tags cut a Release.
+# macOS keeps its own v* tags; this workflow ignores those so the two platforms' "latest"
+# never collide.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows.yml"
+    tags:
+      - "win-v*"
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach assets to a Release on a win-v* tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.x"
+
+      - name: Restore
+        run: dotnet restore Transcribe.sln
+
+      - name: Build (Release)
+        run: dotnet build Transcribe.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Transcribe.sln --configuration Release --no-build --verbosity normal
+
+      - name: Publish single-file self-contained exe
+        run: >
+          dotnet publish Transcribe/Transcribe.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
+          --output publish
+
+      - name: Stage and zip the exe
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/win-v*') {
+            $env:GITHUB_REF -replace '^refs/tags/win-v',''
+          } else {
+            "dev-$($env:GITHUB_SHA.Substring(0,7))"
+          }
+          $zip = "Transcribe-win-x64-$version.zip"
+          Compress-Archive -Path publish/Transcribe.exe -DestinationPath $zip -Force
+          "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload build artifact (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcribe-win-x64
+          path: windows/${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release (win-v* tags only)
+        if: startsWith(github.ref, 'refs/tags/win-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Transcribe for Windows ${{ env.APP_VERSION }}
+          files: windows/${{ env.ZIP_NAME }}
+          draft: false
+          prerelease: false
+          body: |
+            Transcribe for Windows ${{ env.APP_VERSION }} — single-file, self-contained win-x64 build.
+
+            ## Install
+            1. Download and unzip `${{ env.ZIP_NAME }}`.
+            2. Run `Transcribe.exe`. It is **unsigned**, so SmartScreen will warn — click
+               **More info → Run anyway** (acceptable for an internal team).
+            3. Look for the Transcribe icon in the system tray.
+
+            ## Token
+            On first run: accept the consent note, then paste your team token (verified against
+            the proxy on save, stored in Windows Credential Manager). Ask your team admin for it.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

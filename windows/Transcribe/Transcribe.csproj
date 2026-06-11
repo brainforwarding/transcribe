@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>Transcribe</AssemblyName>
+    <RootNamespace>Transcribe.App</RootNamespace>
+
+    <!-- Version shown in the UI (subtle, in the settings popup) and stamped on the assembly. -->
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+    <Product>Transcribe</Product>
+
+    <!-- Publish targets win-x64 (set on the `dotnet publish` command in CI, not here, so a plain
+         `dotnet build`/`dotnet test` of the solution stays RID-agnostic). WinForms + NAudio are
+         not trim-safe, so trimming stays off. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Transcribe.Core\Transcribe.Core.csproj" />
+  </ItemGroup>
+
+</Project>
