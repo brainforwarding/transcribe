@@ -25,7 +25,7 @@ final class AppModel: ObservableObject {
                      LanguageOption(id: "en", name: "English"),
                      LanguageOption(id: "es", name: "Spanish"),
                      LanguageOption(id: "pt", name: "Portuguese")]
-    @Published var languageID: String = "auto"
+    @Published var languageID: String { didSet { UserDefaults.standard.set(languageID, forKey: "languageID") } }
 
     @Published var screenGranted = false
     @Published var micGranted = false
@@ -65,6 +65,7 @@ final class AppModel: ObservableObject {
         keepAudio = UserDefaults.standard.bool(forKey: "keepAudio")
         includeSummary = UserDefaults.standard.bool(forKey: "includeSummary")
         micOnly = UserDefaults.standard.bool(forKey: "micOnly")
+        languageID = UserDefaults.standard.string(forKey: "languageID") ?? "es"
         hasKey = Keychain.get() != nil
         refreshMics()
         Task { await refreshPermissions() }

@@ -60,6 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+        // Don't auto-focus the first control (no blue ring on open).
+        settingsWindow?.makeFirstResponder(nil)
+        DispatchQueue.main.async { self.settingsWindow?.makeFirstResponder(nil) }
     }
 
     @objc private func togglePopover() {
@@ -68,8 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKeyAndOrderFront(nil)
+            let win = popover.contentViewController?.view.window
+            win?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            // Don't auto-focus the first control (no blue ring on the Mic picker on open).
+            win?.makeFirstResponder(nil)
+            DispatchQueue.main.async { win?.makeFirstResponder(nil) }
         }
     }
 }

@@ -58,8 +58,8 @@ struct ContentView: View {
                 Text("After granting Screen Recording, reopen the app to finish.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Quit & Reopen") { Permissions.relaunch() }.controlSize(.small)
-                Toggle("Mic only (no system audio)", isOn: $model.micOnly)
-                Text("Recording just yourself — voice notes, thinking out loud? Mic only skips the Screen & System Audio permission.")
+                Toggle("Record just me (skip this permission)", isOn: $model.micOnly)
+                Text("Only recording yourself — voice notes, self-interviews? \"Just me\" needs no Screen & System Audio permission.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -88,8 +88,17 @@ struct ContentView: View {
             pickerRow("Language", selection: $model.languageID) {
                 ForEach(model.languages) { Text($0.name).tag($0.id) }
             }
-            Toggle("Mic only (no system audio)", isOn: $model.micOnly)
-                .help("Record just your own voice — notes, thinking out loud, self-interviews. No You/Them labels, and no Screen Recording permission needed.")
+            HStack {
+                Text("Mode").frame(width: 64, alignment: .leading).foregroundStyle(.secondary)
+                Picker("", selection: $model.micOnly) {
+                    Text("Meeting").tag(false)
+                    Text("Just me").tag(true)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: .infinity)
+                .help("Meeting: you + everyone on the call (You/Them transcript), needs Screen & System Audio permission. Just me: your voice only — notes, self-interviews.")
+            }
             recordButton(title: "Record", system: "record.circle", tint: .accentColor)
             if !model.statusDetail.isEmpty {
                 Text(model.statusDetail).font(.caption).foregroundStyle(.secondary)
@@ -108,7 +117,7 @@ struct ContentView: View {
                     .monospacedDigit()
             }.padding(.top, 6)
             if model.micOnly {
-                Text("Mic only").font(.caption).foregroundStyle(.secondary)
+                Text("Just me").font(.caption).foregroundStyle(.secondary)
             }
             recordButton(title: "Stop", system: "stop.fill", tint: .red)
         }
@@ -130,7 +139,7 @@ struct ContentView: View {
                     .foregroundStyle(.green).font(.caption)
             }
             Spacer()
-            Button("Open folder") { model.openFolder() }.font(.caption).buttonStyle(.link)
+            Button("Recordings") { model.openFolder() }.font(.caption).buttonStyle(.link)
             Button { model.showSettings?() } label: { Image(systemName: "gearshape") }
                 .buttonStyle(.borderless).help("Settings")
         }
