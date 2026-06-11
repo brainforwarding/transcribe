@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Recordings / transcripts
+recordings/
+
+# SwiftPM build artifacts
+SystemAudioRecorder/.build/
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code local state
+.claude/
+
+# TranscribeBar SwiftPM build
+TranscribeBar/.build/
+
+# Assembled app bundle / build output
+TranscribeBar/build/
