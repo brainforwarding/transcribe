@@ -39,12 +39,18 @@ struct SettingsView: View {
 
             Spacer()
             HStack {
+                Text("Transcribe \(appVersion)").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Quit Transcribe") { NSApp.terminate(nil) }
             }
         }
         .padding(18)
         .frame(width: 380, height: 340)
+    }
+
+    private var appVersion: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        return "v\(v)"
     }
 
     private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {

@@ -11,7 +11,7 @@
          $(AppIdentifierPrefix) is the Team ID prefix, substituted at sign time). -->
     <key>keychain-access-groups</key>
     <array>
-        <string>47SAXBXKHA.com.sebastianmarambio.transcribe</string>
+        <string>K542ZFQH6B.com.sebastianmarambio.transcribe</string>
     </array>
 </dict>
 </plist>
