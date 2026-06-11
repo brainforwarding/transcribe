@@ -13,8 +13,9 @@ transcript. No Dock icon, no window, no fuss.
 
 ## Install
 
-**A — the built app:** open `Transcribe.dmg` → drag to Applications → open it.
-(To produce the notarized DMG yourself, see [`../FINISH.md`](../FINISH.md).)
+**A — the built app:** download the latest notarized `Transcribe.dmg` from
+[**Releases**](https://github.com/brainforwarding/transcribe/releases/latest) → drag to
+Applications → open it. (To cut a new release yourself, see [`../FINISH.md`](../FINISH.md).)
 
 **B — from source** (needs the Swift toolchain / Command Line Tools — **no Xcode**):
 ```bash
@@ -25,8 +26,10 @@ open build/Transcribe.app
 
 ## First run
 1. Find the **waveform** icon in the **menu bar** (top-right, left of the system icons); click it.
-2. Accept the consent note, then paste your **OpenAI API key** (stored in your Keychain).
-3. Click **Grant** for **Screen & System Audio** and **Microphone**.
+2. Accept the consent note, then paste your access credential (stored in your Keychain): a
+   **team token** if your org runs the shared proxy (the field reads "team token" and verifies
+   it on save), or your own **OpenAI API key** otherwise. Ask your team admin for your token.
+3. Click **Grant** for **Microphone** (and **Screen & System Audio** if you'll record meetings).
 4. **Quit & Reopen** once — Screen Recording only activates after a relaunch (a macOS rule).
 
 ## Use
@@ -49,7 +52,8 @@ is lost), or in `audio/` if you enable **Keep audio**. An optional **Summary** (
 `gpt-4o` call) is off by default.
 
 ## Settings (⚙)
-Save folder · Keep audio files · Add summary · Replace key · Quit.
+Save folder · Keep audio files · Add summary · Replace key/token · Quit. The installed
+**version** shows at the bottom-left (`v1.0.0`), so you can check you're on the latest.
 (**Mic only** lives in the menu itself, next to the Mic/Language pickers — Keep audio and the
 summary work in both modes.)
 
