@@ -59,6 +59,8 @@ Core integration contract: SessionAudioTrack(source,spans), AudioSpan(url,offset
 
 Current stage: implementation, independent integration review and available local validation complete. Safe branch codex/two-mode-native-app. Owner explicitly deferred finding credentials; authenticated verification, notarization and publication remain for later. Do not publish an unnotarized installer as production.
 
+Code is committed and pushed. Draft PR: https://github.com/brainforwarding/transcribe/pull/1. Working tree is clean after the final state update. Keep the PR in draft until the deferred real workflows and release gates pass. Source diff whitespace checks pass excluding the verbatim bundled OFL license, whose original text includes a trailing space.
+
 ## Integration review and validation progress
 
 - Circles UI build and native screenshot checks pass with isolated synthetic state. 63 original SVG assets and matching vector PDFs, five licensed Urbanist faces; all referenced icons present. Actual app controls use native window chrome.
