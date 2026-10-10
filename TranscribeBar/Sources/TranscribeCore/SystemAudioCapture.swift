@@ -3,164 +3,139 @@ import AVFoundation
 import ScreenCaptureKit
 import CoreMedia
 
-/// Captures macOS *system output* audio via ScreenCaptureKit (the remote participants),
-/// folded in from the standalone SystemAudioRecorder CLI. Writes a float WAV/CAF and records
-/// the first audio buffer's presentation timestamp (host-time clock) so the mic track can be
-/// aligned sample-accurately. macOS 13+.
 @available(macOS 13.0, *)
 public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
-
-    public enum CaptureError: Error, CustomStringConvertible {
-        case noDisplay
-        public var description: String {
+    public enum CaptureError: Error, LocalizedError {
+        case noDisplay, stopped
+        public var errorDescription: String? {
             switch self {
-            case .noDisplay:
-                return "No display available — this almost always means Screen Recording "
-                     + "permission is missing for this app (System Settings ▸ Privacy & Security "
-                     + "▸ Screen & System Audio Recording)."
+            case .noDisplay: return "Mac audio is unavailable. Check Screen & System Audio Recording permission."
+            case .stopped: return "Audio capture was stopped."
             }
         }
     }
-
-    private let outputURL: URL
     private var stream: SCStream?
-    private var audioFile: AVAudioFile?
     private let writeQueue = DispatchQueue(label: "transcribe.syscap.write")
-
-    // All mutable state below is touched only on writeQueue.
-    private var buffersReceived = 0
-    private var framesWritten: AVAudioFrameCount = 0
-    private var sawNonSilentAudio = false
-    private var loggedDecodeFailure = false
+    private let lock = NSLock()
+    private var stopped = false
     private var firstPTS: CMTime?
-    private var firstBufferFired = false
-
-    /// Optional diagnostics sink (defaults to stderr). The app routes this to its log/UI.
+    private var liveness = AudioLiveness()
+    private var lastLivenessFailure: AudioLiveness.Failure?
+    private var watchdog: DispatchSourceTimer?
+    private let recorder: PCMTrackWriter
     public var onLog: (@Sendable (String) -> Void)?
-    /// Fired once, on the first decoded audio buffer (the in-process successor to the
-    /// stdout READY handshake) — the controller starts the mic here.
     public var onFirstBuffer: (@Sendable () -> Void)?
-
-    public init(outputURL: URL) {
-        self.outputURL = outputURL
+    public var onLevel: (@Sendable (Double) -> Void)?
+    public var onHealth: (@Sendable (CaptureHealth) -> Void)?
+    public var onPart: (@Sendable (AudioSpan) -> Void)?
+    public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))) {
+        recorder = PCMTrackWriter(directory: outputURL.deletingLastPathComponent(), source: .system, epoch: epoch)
+        super.init()
+        recorder.onLevel = { [weak self] in self?.onLevel?($0) }
+        recorder.onHealth = { [weak self] in self?.onHealth?($0) }
+        recorder.onPart = { [weak self] in self?.onPart?($0) }
     }
-
-    private func log(_ s: String) {
-        if let onLog { onLog(s) }
-        else { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
-    }
-
-    /// First audio buffer's presentation timestamp on the host-time clock, or nil if no
-    /// audio has arrived yet. Compared PTS-to-PTS with the mic's first PTS for the offset.
+    deinit { watchdog?.cancel() }
+    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
     public var firstSamplePTS: CMTime? { writeQueue.sync { firstPTS } }
-
+    public var capturedSpans: [AudioSpan] { writeQueue.sync { recorder.spans } }
+    public var closedSpans: [AudioSpan] { writeQueue.sync { recorder.closedSpans() } }
     public struct Summary: Sendable {
         public let buffers: Int
         public let seconds: Double
         public let nonSilent: Bool
     }
-
     public func start() async throws {
+        guard !isStopped else { throw CancellationError() }
+        onHealth?(CaptureHealth(source: .system, state: .starting))
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard !isStopped else { throw CancellationError() }
         guard let display = content.displays.first else { throw CaptureError.noDisplay }
-
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
-        config.capturesAudio = true
-        config.sampleRate = 48_000
-        config.channelCount = 2
+        config.capturesAudio = true; config.sampleRate = 48_000; config.channelCount = 2
         config.excludesCurrentProcessAudio = true
-        // SCK has no audio-only mode; a degenerate frame trips -3805 on macOS 15+, so keep a
-        // small valid frame at a low frame rate.
-        config.width = 128
-        config.height = 128
+        config.width = 128; config.height = 128
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        config.showsCursor = false
-        config.queueDepth = 5
-
+        config.showsCursor = false; config.queueDepth = 5
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
-        try stream.addStreamOutput(self, type: .audio,
-                                   sampleHandlerQueue: DispatchQueue(label: "transcribe.syscap.audio"))
-        // SCK delivers audio reliably only when a screen output also exists; frames ignored.
-        try stream.addStreamOutput(self, type: .screen,
-                                   sampleHandlerQueue: DispatchQueue(label: "transcribe.syscap.screen"))
-        self.stream = stream
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "transcribe.syscap.audio"))
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "transcribe.syscap.screen"))
+        lock.withLock { self.stream = stream }
+        guard !isStopped else { throw CancellationError() }
+        writeQueue.sync { liveness.start(at: captureHostSeconds()); lastLivenessFailure = nil }
         try await stream.startCapture()
-
-        writeQueue.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self else { return }
-            if self.buffersReceived == 0 {
-                self.log("WARNING: no system-audio buffers after 3s — check Screen Recording permission, or nothing is playing.")
+        if isStopped { try? await stream.stopCapture(); throw CancellationError() }
+        writeQueue.sync {
+            guard !isStopped else { return }
+            let timer = DispatchSource.makeTimerSource(queue: writeQueue)
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.isStopped else { return }
+                self.checkLiveness()
             }
+            watchdog = timer; timer.resume()
         }
     }
-
+    private func checkLiveness() {
+        guard let failure = liveness.failure(at: captureHostSeconds()), failure != lastLivenessFailure else { return }
+        lastLivenessFailure = failure; onLevel?(0)
+        if failure == .noBuffers {
+            // A quiet Mac may never send a first buffer. Mic previews continue,
+            // but this is not evidence that system audio was successfully captured.
+            onHealth?(CaptureHealth(source: .system, state: .silent, message: "No Mac audio has arrived yet."))
+        } else {
+            onHealth?(CaptureHealth(source: .system, state: .interrupted,
+                message: "Mac audio stopped arriving. Your microphone is still recording."))
+        }
+    }
     @discardableResult
     public func stop() async -> Summary {
-        try? await stream?.stopCapture()
+        let currentStream = lock.withLock { stopped = true; return stream }
+        writeQueue.sync {
+            checkLiveness()
+            watchdog?.cancel(); watchdog = nil
+        }
+        try? await currentStream?.stopCapture()
         return writeQueue.sync {
-            let seconds = Double(framesWritten) / 48_000.0
-            audioFile = nil   // flush / close
-            let status = buffersReceived == 0
-                ? "NO audio buffers — Screen Recording permission likely missing"
-                : (sawNonSilentAudio ? "non-silent ✓" : "SILENT (all-zero) — check permission / playback")
-            log(String(format: "system audio: %d buffers, %.1fs — %@", buffersReceived, seconds, status))
-            return Summary(buffers: buffersReceived, seconds: seconds, nonSilent: sawNonSilentAudio)
+            _ = recorder.stop(); onLevel?(0)
+            return Summary(buffers: recorder.bufferCount, seconds: recorder.spans.reduce(0) { $0 + $1.duration }, nonSilent: recorder.sawSignal)
         }
     }
-
-    // MARK: - SCStreamOutput
-
-    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                       of type: SCStreamOutputType) {
-        guard type == .audio, sampleBuffer.isValid else { return }
+    public func restart(shouldContinue: @Sendable () -> Bool = { true }) async throws {
+        _ = await stop()
+        let allowed = lock.withLock { () -> Bool in
+            guard shouldContinue() else { return false }
+            stopped = false
+            return true
+        }
+        guard allowed else { throw CancellationError() }
+        try await start()
+    }
+    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio, !isStopped, sampleBuffer.isValid,
+              let pcm = Self.makePCMBuffer(from: sampleBuffer) else { return }
         let pts = sampleBuffer.presentationTimeStamp
-        guard let pcm = SystemAudioCapture.makePCMBuffer(from: sampleBuffer) else {
-            writeQueue.async { [weak self] in
-                guard let self, !self.loggedDecodeFailure else { return }
-                self.loggedDecodeFailure = true
-                self.log("WARNING: failed to decode an audio buffer (further warnings suppressed)")
-            }
-            return
-        }
-        let nonSilent = SystemAudioCapture.bufferHasSignal(pcm)
         writeQueue.async { [weak self] in
-            guard let self else { return }
-            self.buffersReceived += 1
-            if !self.firstBufferFired {
-                self.firstBufferFired = true
-                self.firstPTS = pts
-                self.onFirstBuffer?()
+            guard let self, !self.isStopped else { return }
+            self.liveness.received(at: captureHostSeconds())
+            if self.lastLivenessFailure != nil {
+                self.lastLivenessFailure = nil
+                self.onHealth?(CaptureHealth(source: .system, state: .active))
             }
-            if nonSilent { self.sawNonSilentAudio = true }
-            do {
-                if self.audioFile == nil {
-                    let settings: [String: Any] = [
-                        AVFormatIDKey: kAudioFormatLinearPCM,
-                        AVSampleRateKey: pcm.format.sampleRate,
-                        AVNumberOfChannelsKey: pcm.format.channelCount,
-                        AVLinearPCMBitDepthKey: 32,
-                        AVLinearPCMIsFloatKey: true,
-                        AVLinearPCMIsBigEndianKey: false,
-                    ]
-                    self.audioFile = try AVAudioFile(forWriting: self.outputURL, settings: settings,
-                                                     commonFormat: pcm.format.commonFormat,
-                                                     interleaved: pcm.format.isInterleaved)
-                }
-                try self.audioFile?.write(from: pcm)
-                self.framesWritten += pcm.frameLength
-            } catch {
-                self.log("write error: \(error)")
+            if self.firstPTS == nil { self.firstPTS = pts; self.onFirstBuffer?() }
+            do { try self.recorder.append(pcm, pts: CMTimeGetSeconds(pts)) }
+            catch {
+                self.onHealth?(CaptureHealth(source: .system, state: .interrupted, message: "Mac audio could not be saved."))
+                self.onLog?("Mac audio could not be saved.")
             }
         }
     }
-
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
-        let ns = error as NSError
-        log("stream stopped with error: \(error) [\(ns.domain) \(ns.code)]")
+        guard !isStopped else { return }
+        onHealth?(CaptureHealth(source: .system, state: .interrupted, message: "Mac audio stopped. Retry Mac audio to continue."))
+        onLevel?(0)
     }
-
-    // MARK: - helpers
 
     static func makePCMBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard let fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer),

@@ -9,6 +9,26 @@ import AppKit
 /// 15.1+). Granting Screen Recording requires an app relaunch to take effect.
 enum Permissions {
 
+    static func accessibilityAuthorized() -> Bool { AXIsProcessTrusted() }
+
+    static func requestAccessibility() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }
+
+    static func inputMonitoringAuthorized() -> Bool { CGPreflightListenEventAccess() }
+
+    @discardableResult
+    static func requestInputMonitoring() -> Bool { CGRequestListenEventAccess() }
+
+    static func openAccessibilitySettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    }
+
+    static func openInputMonitoringSettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+    }
+
     static func micAuthorized() -> Bool {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }

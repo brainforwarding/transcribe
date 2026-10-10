@@ -1,97 +1,46 @@
-# Operating & shipping Transcribe.app
+# Operating and shipping Transcribe
 
-Everything below is already set up. This is the runbook for shipping updates and managing the
-team. The signing identity is **Developer ID Application: ED4.ONE SpA (`K542ZFQH6B`)** and the
-notarization profile in the Keychain is **`meetrec-notary`**.
+The native two-mode implementation is tracked in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The Python CLI and Windows distribution are separate.
 
-> The Python CLI (`meetrec.py`) is a separate tool and is untouched by any of this.
+## Current release readiness
 
-## How auth works (shared-key team tokens)
+The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The documented `meetrec-notary` profile is absent here. The project owner has deferred locating the existing Apple notarization credentials and personal Transcribe team token. Do not publish this version before authenticated workflow verification and notarization.
 
-Coworkers do **not** paste an OpenAI key. The org key lives only in the Cloudflare Worker
-(`proxy/`). Each person pastes a **personal team token** where the app asks for one; the Worker
-validates it and swaps in the org key server-side. The app is pointed at the Worker via
-`Config.proxyBaseURL` (`TranscribeBar/Sources/TranscribeApp/Config.swift`):
+Development secrets are canonical in 1Password. App tokens go into the existing macOS Keychain service/account through Settings. Do not copy plaintext environment files between computers or replace production worker secrets to create a test token. Existing credential rotation, scope changes or production changes require explicit human approval.
 
-```
-https://transcribe-proxy.quiet-bush-25b1.workers.dev/v1
-```
+## Authentication
 
-Tokens live in `proxy/TEAM_TOKENS.local` (gitignored, never committed). Full proxy details:
-[`proxy/README.md`](proxy/README.md).
+The app uses the existing Cloudflare proxy configured in `TranscribeBar/Sources/TranscribeApp/Config.swift`. Each person enters a personal team token. The worker's OpenAI API key remains server-side; a local OpenAI API key is unnecessary for this app build. The proxy supports file transcription and the existing `gpt-4o` notes route. Its default rate is 120 requests/person/hour.
 
-## Distribution (GitHub Releases)
+## Local validation
 
-The notarized DMG ships as a GitHub Release. Coworkers always download from the same link:
+From `TranscribeBar`:
 
-```
-https://github.com/brainforwarding/transcribe/releases/latest
+```bash
+swift run transcribe-core selftest
+./scripts/test-native.sh
+./scripts/test-coordinator.sh
+SIGN_IDENTITY="Developer ID Application: ED4.ONE SpA (K542ZFQH6B)" ./scripts/make-app.sh release
+./scripts/verify-app.sh build/Transcribe.app --launch
 ```
 
-Send each person that link **plus their token** (from `proxy/TEAM_TOKENS.local`). Install steps
-are written into each release's notes; the app shows its version at the bottom-left of Settings
-so people can confirm they're on the latest.
+Quit other Transcribe instances before the isolated launch check. Verify the app again after relocating it away from the SwiftPM build tree so missing bundled fonts/icons cannot be masked by development resources. The launch check uses Launch Services, requires completed AppKit startup and confirms the process belongs to the tested app.
 
-## Ship an update (~5 min)
+The unnecessary restricted `keychain-access-groups` entitlement has been removed. The existing bundle ID, Keychain service/account, Hardened Runtime and microphone entitlement remain. No provisioning profile is needed for these file-based Keychain operations.
 
-1. Make your changes. Bump the version in `TranscribeBar/scripts/make-app.sh`
-   (`CFBundleShortVersionString`).
-2. Build, sign, notarize:
+## Complete release when credentials are available
+
+1. Make the existing canonical personal token available privately and save it through Settings. Verify real dictation from an editable field, Escape recovery, paste-last, a controlled online/in-person meeting, notes generation and retry behavior. Grant macOS recording/Accessibility permissions where needed. Do not print tokens or recorded private speech in logs.
+2. Provision the existing `meetrec-notary` Keychain profile from the canonical Apple credentials. Do not pass passwords in shell history or store them in Git.
+3. Run the local checks above against the final source revision, then:
+
    ```bash
    cd TranscribeBar
-   SIGN_IDENTITY="Developer ID Application: ED4.ONE SpA (K542ZFQH6B)" ./scripts/make-app.sh release
    NOTARY_PROFILE="meetrec-notary" ./scripts/notarize.sh
    ```
-   Output: **`build/Transcribe.dmg`**, notarized and stapled (works offline on first open).
-   Verify Gatekeeper sees it: `spctl -a -vvv -t install build/Transcribe.app` → `accepted`.
-3. Publish the release:
-   ```bash
-   cd ..
-   gh release create v1.0.1 TranscribeBar/build/Transcribe.dmg \
-     --title "Transcribe 1.0.1" --notes "What changed…"
-   ```
-4. Tell the team "v1.0.1 is up, grab it from the Releases link." They check ⚙ Settings to
-   confirm the version.
 
-## Manage the team
+   The script notarizes/staples the app first, creates the DMG containing that stapled app, notarizes/staples the DMG, assesses both and launches the contained app from the mounted final installer. Accepted status and all gates are required.
+4. Publish `TranscribeBar/build/Transcribe.dmg` to the explicit Mac tag `v2.0.0`, with release notes describing the two modes and permissions. Use a body file for the exact multiline notes. Do not use `/releases/latest` for Mac installation: Windows tags share this repository.
+5. Download the published asset, mount it read-only, validate staples/signatures/Gatekeeper and launch the contained app. Update installation links to `https://github.com/brainforwarding/transcribe/releases/tag/v2.0.0` only once that release exists. Confirm fonts/icons without the build resources available.
 
-- **Add / rename / remove a person:** edit `proxy/TEAM_TOKENS.local` (one `name:token` per
-  person; `openssl rand -hex 16` for a new token), then push the combined value:
-  ```bash
-  cd proxy && wrangler secret put TEAM_TOKENS < TEAM_TOKENS.secret.local
-  ```
-  Takes effect in seconds, no redeploy, no new app build. Removing a token revokes that person.
-- **Rotate the org key:** `wrangler secret put OPENAI_API_KEY`.
-- **Rate limit:** `RATE_PER_HOUR` in `proxy/wrangler.toml` (default 120/person/hour).
-
-## Build from source (no signing)
-
-For local dev without distributing, ad-hoc sign is fine:
-```bash
-cd TranscribeBar
-./scripts/make-app.sh        # builds build/Transcribe.app (ad-hoc)
-open build/Transcribe.app    # waveform icon in the menu bar
-```
-
-## One-time setup (already done — kept for reference / a new signing machine)
-
-- **Developer ID Application cert** (ED4.ONE SpA): created via Keychain Access → *Certificate
-  Assistant → Request a Certificate from a Certificate Authority* (save the CSR to disk) →
-  developer.apple.com → Certificates → **+** → **Developer ID Application** → upload CSR →
-  download `.cer` → double-click to install into the **login** keychain. Verify:
-  `security find-identity -v -p codesigning` shows `Developer ID Application: ED4.ONE SpA (K542ZFQH6B)`.
-  To sign from another Mac, export the cert+key as a `.p12` (Keychain Access → right-click →
-  Export) and import it there.
-- **Notarization credentials:** `xcrun notarytool store-credentials "meetrec-notary"
-  --apple-id "you@example.com" --team-id "K542ZFQH6B"` (paste an app-specific password from
-  appleid.apple.com → Sign-In & Security). Stored in the Keychain; no file to keep.
-- **Entitlement:** `TranscribeBar/Transcribe.entitlements` keychain-access-group prefix must be
-  the signing Team ID (`K542ZFQH6B.com.sebastianmarambio.transcribe`). A mismatch causes a
-  `-34018` Keychain error at runtime.
-- **Proxy deploy:** see [`proxy/README.md`](proxy/README.md) (wrangler, KV namespace, the
-  `OPENAI_API_KEY` and `TEAM_TOKENS` secrets).
-
-## Cost & privacy backstops
-
-Set a hard spending limit on the OpenAI org (the team shares one key), and request
-**Zero-Data-Retention (ZDR)** so uploaded audio isn't retained.
+The app version/build can be set with non-secret `APP_VERSION` / `APP_BUILD_NUMBER` when packaging. Distribution requires the explicit Developer ID identity. Do not ship an ad-hoc build as a notarized installer.

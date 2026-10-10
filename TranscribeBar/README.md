@@ -1,85 +1,58 @@
 # Transcribe
 
-A tiny **macOS menu-bar app** that records a meeting — the other people's audio **and** your
-mic — transcribes both with OpenAI Whisper, and saves a clean, speaker-labelled Markdown
-transcript. No Dock icon, no window, no fuss.
+Native macOS dictation and meeting notes, using the Circles interface. Apple Silicon, macOS 13 or later.
 
-- **System audio via ScreenCaptureKit** (the remote participants) — no BlackHole / virtual device.
-- **Your mic via AVFoundation**, captured in parallel and merged on a shared timeline → a
-  **You / Them** transcript.
-- **Fully native Swift** — no Python, no ffmpeg. macOS 13+ (tested on Sequoia 15.x & Tahoe 26.x).
+## Run from source
 
-> ⚠️ It records other people. Tell them and get their consent.
+Version 2.0 passes local builds, regression checks and signed-artifact launch validation. Authenticated transcription testing and notarized publication are deferred until the existing team token and Apple notarization profile are available. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
 
-## Install
-
-**A — the built app:** download the latest notarized `Transcribe.dmg` from
-[**Releases**](https://github.com/brainforwarding/transcribe/releases/latest) → drag to
-Applications → open it. (To cut a new release yourself, see [`../FINISH.md`](../FINISH.md).)
-
-**B — from source** (needs the Swift toolchain / Command Line Tools — **no Xcode**):
 ```bash
 cd TranscribeBar
-./scripts/make-app.sh        # builds + signs build/Transcribe.app
+./scripts/make-app.sh release
 open build/Transcribe.app
 ```
 
-## First run
-1. Find the **waveform** icon in the **menu bar** (top-right, left of the system icons); click it.
-2. Accept the consent note, then paste your access credential (stored in your Keychain): a
-   **team token** if your org runs the shared proxy (the field reads "team token" and verifies
-   it on save), or your own **OpenAI API key** otherwise. Ask your team admin for your token.
-3. Click **Grant** for **Microphone** (and **Screen & System Audio** if you'll record meetings).
-4. **Quit & Reopen** once — Screen Recording only activates after a relaunch (a macOS rule).
+The app lives in the menu bar. Open Transcribe for history, meetings, dictionary and settings.
 
-## Use
-Pick your **Mic** and **Language**, click **Record**, talk / let the call play, click **Stop**.
-On stop you can give the recording an optional **title** — Enter saves it, Escape (or leaving it
-empty) skips with no fuss; transcription is already running either way. A transcript lands in
-`~/Documents/Transcribe/` — one file per recording: `2026-06-05-weekly-sync.md` with a title
-(it also becomes the transcript's heading), `2026-06-05_21-52-17.md` without.
-**Use a headset** for best results (speakers echo into both tracks).
+## Connect
 
-**Mic only** (the toggle under the pickers) records just your own voice — voice notes, thinking
-out loud, self-interviews. No system audio is captured, so it needs no Screen & System Audio
-permission, and the transcript is plain flowing paragraphs instead of You/Them turns. The
-headset advice doesn't apply there either.
+This build uses the existing shared proxy. Enter your **personal team token** in Settings; you do not need a local OpenAI API key or environment file. The token is stored in the macOS Keychain. Development credentials remain canonical in 1Password.
 
-## What you get
-A title + the merged **Conversation** (You = your mic, Them = the call). Raw audio is deleted
-after a successful transcript — kept in `_unfinished/` only if transcription fails (so nothing
-is lost), or in `audio/` if you enable **Keep audio**. An optional **Summary** (a second
-`gpt-4o` call) is off by default.
+Allow Microphone for recording and Accessibility for double Option and cursor insertion. Online meetings additionally need Screen & System Audio Recording. macOS may require quitting and reopening after granting that permission. In-person meetings and dictation only use the microphone.
 
-## Settings (⚙)
-Save folder · Keep audio files · Add summary · Replace key/token · Quit. The installed
-**version** shows at the bottom-left (`v1.0.0`), so you can check you're on the latest.
-(**Mic only** lives in the menu itself, next to the Mic/Language pickers — Keep audio and the
-summary work in both modes.)
+Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac. Let participants know before recording.
 
-## How it works
-Capture (ScreenCaptureKit + AVCaptureSession) → segment to 16 kHz mono m4a → **OpenAI Whisper**
-per track → merge by timestamp **locally, no AI** → write Markdown. The optional summary is a
-`gpt-4o` call. Audio is uploaded to OpenAI; for shared-key, single-sign-on billing (so coworkers
-need no key), deploy the proxy in [`../proxy/`](../proxy/README.md).
+## Dictation
 
-## Troubleshooting
-- **No menu-bar icon?** It's the waveform, just left of Wi-Fi/battery/Control Center.
-- **Permission still red after granting?** Quit & Reopen — Screen Recording needs the relaunch.
-- **"Transcribe wants to use your Keychain"?** Click **Always Allow** — it's reading the key you saved.
-- **"…bypass the private window picker"?** Click **Allow** — that's the normal macOS 15+/Tahoe
-  system-audio consent (it re-asks roughly monthly; can't be suppressed without a special entitlement).
-- **Transcript is gibberish / "thank you for watching"?** The audio was silent — Whisper invents
-  phrases on silence. Make sure audio is actually playing and you're on a headset.
+- Double-tap Option to start and finish. A small chip shows input and elapsed time.
+- At 4:30 the chip shows the 30-second warning. Recording stops at five minutes.
+- Text inserts into the original field only if its app, field, value and selection are still valid. Otherwise it stays ready to copy.
+- Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.
+- Option–Shift–V pastes the last dictation at the current editable cursor. Disable this shortcut in Settings if needed. The menu and history also provide copy actions.
 
-## Develop
+Dictation uses `gpt-transcribe`. Dictionary terms are optional recognition hints.
+
+## Meetings
+
+Choose **Online meeting** for microphone plus all audio playing on the Mac, or **In person** for microphone only. Meetings have no five-minute limit. Use a headset for online meetings to reduce acoustic duplication.
+
+Write personal notes while recording. The provisional transcript arrives in finalized windows about every 45 seconds plus processing time; it is replaced by the final transcript. Preview failure does not stop capture. Source indicators distinguish quiet audio from unavailable or interrupted capture. Retry Mac audio can restore capture while preserving gaps.
+
+Final meeting transcription uses `gpt-4o-transcribe-diarize` for genuine timed turns. Labels describe audio sources: You / System audio online, Microphone in person. They do not identify individual participants. Generated notes use the existing `gpt-4o` summary route and include validated links to transcript turns or the personal-note snapshot. Unknown action owners remain unassigned. Original notes and edited generated notes are stored separately.
+
+Failed or partial transcription retains audio and accepted chunks for retry. Complete transcripts are saved before audio cleanup. Keep audio in Settings retains successful raw tracks too. History is in `~/Library/Application Support/Transcribe/Sessions`; meeting Markdown exports use the selected save folder. Import existing Markdown through **Settings → Import recordings…**. Originals remain unchanged and are not imported again after export.
+
+## Validate and release
+
 ```bash
-swift run transcribe-core selftest          # merge unit tests (no network)
-swift run transcribe-core capture <dir> 8   # headless capture + transcribe test
+swift run transcribe-core selftest
+./scripts/test-native.sh
+./scripts/test-coordinator.sh
+./scripts/verify-app.sh build/Transcribe.app --launch
 ```
-Targets: **TranscribeCore** (capture / segment / transcribe / merge), **transcribe-core** (CLI),
-**TranscribeApp** (the menu-bar UI). Design notes: [`../docs/menubar-app-spec.md`](../docs/menubar-app-spec.md).
-Release & notarization: [`../FINISH.md`](../FINISH.md).
 
-There's also a terminal-only sibling — the `meetrec.py` CLI in the repo root — that does the same
-capture/transcribe pipeline without the app.
+The checks use Command Line Tools without XCTest or network credentials. A local launch is not a notarization check.
+
+Once credentials are available, follow [the implementation state](../docs/IMPLEMENTATION.md) and [release instructions](../FINISH.md). The release script notarizes and staples the app before creating the installer, then verifies the app inside the final DMG. Publish the Mac version through its explicit release URL and verify the downloaded artifact.
+
+The Python CLI and Windows app remain separate entry points.

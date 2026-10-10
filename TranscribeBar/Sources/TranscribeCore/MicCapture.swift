@@ -8,127 +8,136 @@ public struct MicDevice: Sendable, Identifiable, Hashable {
     public var id: String { uniqueID }
 }
 
-/// Records a chosen microphone via AVCaptureSession (the only reliable way to capture a
-/// *non-default* device — AVAudioEngine is locked to the system default input). Writes
-/// Float32 LinearPCM (the writer converts, absorbing AVCaptureSession's first-buffer
-/// 24/32-bit format drift) and records the first buffer's PTS for sample-accurate alignment.
 @available(macOS 13.0, *)
 public final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
-
-    /// Input devices for the mic picker. Selected by stable uniqueID.
     public static func available() -> [MicDevice] {
         var types: [AVCaptureDevice.DeviceType] = [.builtInMicrophone]
         if #available(macOS 14.0, *) { types.append(.external) }
-        let session = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .audio, position: .unspecified)
-        return session.devices.map { MicDevice(uniqueID: $0.uniqueID, name: $0.localizedName) }
+        return AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .audio, position: .unspecified)
+            .devices.map { MicDevice(uniqueID: $0.uniqueID, name: $0.localizedName) }
     }
-
-    private let outputURL: URL
     private let session = AVCaptureSession()
     private let output = AVCaptureAudioDataOutput()
     private let queue = DispatchQueue(label: "transcribe.mic.capture")
-
-    private var writer: AVAssetWriter?
-    private var writerInput: AVAssetWriterInput?
+    private let lock = NSLock()
+    private var stopped = false
     private var firstPTS: CMTime?
-    private var started = false
-    private var samples = 0
-
+    private var liveness = AudioLiveness()
+    private var livenessReported = false
+    private var watchdog: DispatchSourceTimer?
+    private var observers: [NSObjectProtocol] = []
+    private let recorder: PCMTrackWriter
     public var onLog: (@Sendable (String) -> Void)?
-
-    public init(outputURL: URL) { self.outputURL = outputURL }
-
-    private func log(_ s: String) {
-        if let onLog { onLog(s) } else { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+    public var onLevel: (@Sendable (Double) -> Void)?
+    public var onHealth: (@Sendable (CaptureHealth) -> Void)?
+    public var onPart: (@Sendable (AudioSpan) -> Void)?
+    public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))) {
+        recorder = PCMTrackWriter(directory: outputURL.deletingLastPathComponent(), source: .mic, epoch: epoch)
+        super.init()
+        recorder.onLevel = { [weak self] in self?.onLevel?($0) }
+        recorder.onHealth = { [weak self] in self?.onHealth?($0) }
+        recorder.onPart = { [weak self] in self?.onPart?($0) }
+        for name in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: session, queue: nil) { [weak self] _ in
+                guard let self else { return }
+                self.queue.async { [weak self] in
+                    guard let self, !self.isStopped else { return }
+                    self.reportInterruption("Microphone capture was interrupted. The saved audio is preserved.")
+                }
+            })
+        }
     }
-
+    deinit { watchdog?.cancel(); observers.forEach(NotificationCenter.default.removeObserver) }
+    private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
     public var firstSamplePTS: CMTime? { queue.sync { firstPTS } }
-
-    /// `uniqueID == nil` → system default input. Returns the resolved device name.
+    public var capturedSpans: [AudioSpan] { queue.sync { recorder.spans } }
+    public var closedSpans: [AudioSpan] { queue.sync { recorder.closedSpans() } }
     @discardableResult
     public func start(uniqueID: String?) throws -> String {
-        let device: AVCaptureDevice
-        if let uniqueID, let d = AVCaptureDevice(uniqueID: uniqueID) {
-            device = d
-        } else if let d = AVCaptureDevice.default(for: .audio) {
-            if uniqueID != nil { log("mic '\(uniqueID!)' not found — using system default input.") }
-            device = d
-        } else {
-            throw RuntimeError("no audio input device available")
-        }
-
-        session.beginConfiguration()
-        let input = try AVCaptureDeviceInput(device: device)
-        guard session.canAddInput(input) else { throw RuntimeError("cannot add mic input") }
-        session.addInput(input)
-        output.setSampleBufferDelegate(self, queue: queue)
-        guard session.canAddOutput(output) else { throw RuntimeError("cannot add mic output") }
-        session.addOutput(output)
-        session.commitConfiguration()
-        session.startRunning()
-        return device.localizedName
-    }
-
-    public func stop() async {
-        session.stopRunning()
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            queue.async { [weak self] in
-                guard let self else { cont.resume(); return }
-                guard let writer = self.writer, let input = self.writerInput, writer.status == .writing else {
-                    cont.resume(); return
+        let name = try queue.sync {
+            guard !isStopped else { throw CancellationError() }
+            let device: AVCaptureDevice
+            if let uniqueID {
+                guard let chosen = AVCaptureDevice(uniqueID: uniqueID) else {
+                    throw RuntimeError("The selected microphone is unavailable. Choose another microphone.")
                 }
-                input.markAsFinished()
-                writer.finishWriting { cont.resume() }
+                device = chosen
+            } else {
+                guard let chosen = AVCaptureDevice.default(for: .audio) else { throw RuntimeError("No microphone is available.") }
+                device = chosen
+            }
+            onHealth?(CaptureHealth(source: .mic, state: .starting))
+            session.beginConfiguration()
+            defer { session.commitConfiguration() }
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input), session.canAddOutput(output) else {
+                throw RuntimeError("The microphone could not be configured.")
+            }
+            session.addInput(input); session.addOutput(output)
+            output.setSampleBufferDelegate(self, queue: queue)
+            return device.localizedName
+        }
+        try beginRunning()
+        return name
+    }
+    fileprivate func beginRunning() throws {
+        try queue.sync {
+            guard !isStopped else { throw CancellationError() }
+            session.startRunning()
+            if isStopped { session.stopRunning(); throw CancellationError() }
+            guard session.isRunning else { throw RuntimeError("The microphone could not start.") }
+            liveness.start(at: captureHostSeconds())
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.isStopped else { return }
+                self.checkLiveness()
+            }
+            watchdog = timer; timer.resume()
+        }
+    }
+    private func reportInterruption(_ message: String) {
+        guard !livenessReported else { return }
+        livenessReported = true
+        onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: message))
+        onLevel?(0)
+    }
+    private func checkLiveness(at time: Double = captureHostSeconds()) {
+        guard let failure = liveness.failure(at: time) else { return }
+        reportInterruption(failure == .noBuffers
+            ? "No microphone audio arrived. Check the microphone and its permission."
+            : "Microphone audio stopped arriving. The saved audio is preserved.")
+    }
+    public func stop() async {
+        let stopRequestedAt = captureHostSeconds()
+        lock.withLock { stopped = true }
+        await withCheckedContinuation { continuation in
+            queue.async {
+                self.checkLiveness(at: stopRequestedAt)
+                self.watchdog?.cancel(); self.watchdog = nil
+                self.session.stopRunning()
+                _ = self.recorder.stop()
+                self.onLevel?(0)
+                continuation.resume()
             }
         }
-        log("mic: \(samples) buffers captured")
     }
-
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                               from connection: AVCaptureConnection) {
-        guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
-        samples += 1
-        if !started {
-            started = true
-            let pts = sampleBuffer.presentationTimeStamp
-            firstPTS = pts
-            // Derive sample rate / channels from the first buffer; encode to Float32 PCM CAF.
-            var sampleRate = 48_000.0
-            var channels = 1
-            if let fd = CMSampleBufferGetFormatDescription(sampleBuffer),
-               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee {
-                sampleRate = asbd.mSampleRate
-                channels = Int(asbd.mChannelsPerFrame)
-            }
-            do {
-                try? FileManager.default.removeItem(at: outputURL)
-                let w = try AVAssetWriter(outputURL: outputURL, fileType: .caf)
-                let settings: [String: Any] = [
-                    AVFormatIDKey: kAudioFormatLinearPCM,
-                    AVSampleRateKey: sampleRate,
-                    AVNumberOfChannelsKey: channels,
-                    AVLinearPCMBitDepthKey: 32,
-                    AVLinearPCMIsFloatKey: true,
-                    AVLinearPCMIsBigEndianKey: false,
-                    AVLinearPCMIsNonInterleaved: false,
-                ]
-                let wi = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
-                wi.expectsMediaDataInRealTime = true
-                guard w.canAdd(wi) else { log("mic: cannot add writer input"); return }
-                w.add(wi)
-                guard w.startWriting() else { log("mic: writer start failed: \(w.error?.localizedDescription ?? "?")"); return }
-                w.startSession(atSourceTime: pts)
-                self.writer = w
-                self.writerInput = wi
-            } catch {
-                log("mic: writer setup failed: \(error)")
-                return
-            }
+        guard !isStopped, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        liveness.received(at: captureHostSeconds())
+        guard let pcm = SystemAudioCapture.makePCMBuffer(from: sampleBuffer) else {
+            reportInterruption("Microphone audio could not be decoded."); return
         }
-        if let input = writerInput, input.isReadyForMoreMediaData {
-            if !input.append(sampleBuffer) {
-                log("mic: append failed: \(writer?.error?.localizedDescription ?? "?")")
-            }
+        if firstPTS == nil { firstPTS = sampleBuffer.presentationTimeStamp }
+        do { try recorder.append(pcm, pts: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp)) }
+        catch {
+            onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: "Microphone audio could not be saved."))
+            onLog?("Microphone audio could not be saved.")
         }
+    }
+    public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer,
+                              from connection: AVCaptureConnection) {
+        onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: "Microphone audio was interrupted."))
     }
 }

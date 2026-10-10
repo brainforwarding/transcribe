@@ -1,222 +1,190 @@
 import SwiftUI
-import AppKit
 import TranscribeCore
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
-
     var body: some View {
         Group {
-            if !model.consentAccepted { consent }
-            else if !model.hasKey { keyEntry }
-            else if model.needsSetup { setup }
-            else { main }
+            if let active = model.activeRecord, active.kind == .meeting, model.phase == .starting || model.phase == .recording {
+                MeetingWorkspaceView(record: active)
+            } else {
+            HStack(spacing: 0) {
+            sidebar
+            if model.sidebar == .settings { SettingsView() }
+            else if model.sidebar == .dictionary { DictionaryView() }
+            else if model.records.isEmpty && !model.ready { SetupView() }
+            else if model.sidebar == .meetings && model.meetingSetupPresented && !model.isBusy { MeetingSetupView(onCancel: { model.meetingSetupPresented = false }) }
+            else {
+                history
+                if let record = model.selectedRecord {
+                    if record.kind == .meeting { MeetingWorkspaceView(record: record) }
+                    else { DictationDetailView(record: record) }
+                } else { emptyDetail }
+            }
         }
-        .padding(14)
-        .frame(width: 300)
+            }
+        }
+        .preferredColorScheme(model.colorScheme)
+        .font(DesignSystem.font()).foregroundStyle(DesignSystem.primary).background(DesignSystem.surface)
+        .frame(minWidth: 880, idealWidth: 1120, maxWidth: .infinity, minHeight: 560, idealHeight: 680, maxHeight: .infinity)
         .onAppear { Task { await model.refreshPermissions(); model.refreshMics() } }
+        .onChange(of: model.activeSessionID) { id in if id != nil { model.meetingSetupPresented = false } }
     }
-
-    // MARK: onboarding
-
-    private var consent: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Before you record").font(.headline)
-            Text("This captures your mic **and everyone else's** audio and uploads it to OpenAI to transcribe. Tell participants and get their consent. Transcripts are saved on your Mac.")
-                .font(.callout).foregroundStyle(.secondary)
-            Button("I understand — continue") { model.acceptConsent() }
-                .buttonStyle(.borderedProminent).frame(maxWidth: .infinity).controlSize(.large)
-        }
+    private func switchSidebar(_ sidebar: AppModel.Sidebar) {
+        model.sidebar = sidebar; model.selectedRecordID = nil; model.searchText = ""; model.meetingSetupPresented = false
     }
-
-    private var keyEntry: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(Config.proxyBaseURL != nil ? "Add your team token" : "Add your OpenAI key").font(.headline)
-            Text("Stored securely in your Keychain.").font(.caption).foregroundStyle(.secondary)
-            KeyField()
-            if model.keyStatus == .rejected {
-                Text("✗ token not recognized — check it and try again").font(.caption).foregroundStyle(.red)
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Transcribe").font(DesignSystem.font(18, weight: .bold)).padding(.bottom, 8)
+            nav("Dictation", "history-imgIconMicrophone", selected: model.sidebar == .dictation) { switchSidebar(.dictation) }
+            nav("Meetings", "history-imgIconVideo", selected: model.sidebar == .meetings) { switchSidebar(.meetings) }
+            nav("Dictionary", "history-imgIconBook", selected: model.sidebar == .dictionary) { switchSidebar(.dictionary) }
+            nav("Settings", "history-imgIconSetting2", selected: model.sidebar == .settings) { switchSidebar(.settings) }
+            Spacer()
+            HStack(spacing: 8) {
+                DesignIcon(name: "history-imgIconTickCircle", size: 14, color: DesignSystem.muted)
+                Text(model.hasKey ? "Connected" : "Set up account").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
             }
-            if Config.proxyBaseURL == nil {
-                Link("Get a key →", destination: URL(string: "https://platform.openai.com/api-keys")!).font(.caption)
-            } else {
-                Text("Ask your team admin for your token.").font(.caption).foregroundStyle(.secondary)
-            }
-        }
+        }.padding(16).frame(width: 180).frame(maxHeight: .infinity).background(DesignSystem.subtle)
     }
-
-    // MARK: setup (only shown while a grant is missing)
-
-    private var setup: some View {
+    private func nav(_ title: String, _ icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                DesignIcon(name: icon)
+                Text(title).font(DesignSystem.font(14, weight: .semibold))
+                Spacer(minLength: 0)
+            }.padding(8).frame(height: 38)
+                .background(selected ? DesignSystem.selected : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(RoundedRectangle(cornerRadius: 8))
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+    }
+    private var history: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Finish setup").font(.headline)
-            if !model.micOnly {
-                permissionRow("Screen & System Audio", model.screenGranted) { model.grantScreen() }
-            }
-            permissionRow("Microphone", model.micGranted) { model.grantMic() }
-            if !model.screenGranted && !model.micOnly {
-                Text("After granting Screen Recording, reopen the app to finish.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Quit & Reopen") { Permissions.relaunch() }.controlSize(.small)
-                Toggle("Record just me (skip this permission)", isOn: $model.micOnly)
-                Text("Only recording yourself — voice notes, self-interviews? \"Just me\" needs no Screen & System Audio permission.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            footer
-        }
-    }
-
-    // MARK: main (idle / recording / transcribing)
-
-    @ViewBuilder private var main: some View {
-        switch model.phase {
-        case .recording: recording
-        case .transcribing: transcribing
-        default: idle
-        }
-    }
-
-    private var idle: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            pickerRow("Mic", selection: Binding(
-                get: { model.selectedMicID ?? "" },
-                set: { model.selectedMicID = $0.isEmpty ? nil : $0 })) {
-                Text("System default").tag("")
-                ForEach(model.mics) { Text($0.name).tag($0.uniqueID) }
-            }
-            pickerRow("Language", selection: $model.languageID) {
-                ForEach(model.languages) { Text($0.name).tag($0.id) }
-            }
             HStack {
-                Text("Mode").frame(width: 64, alignment: .leading).foregroundStyle(.secondary)
-                Picker("", selection: $model.micOnly) {
-                    Text("Meeting").tag(false)
-                    Text("Just me").tag(true)
+                Text(model.sidebar == .meetings ? "Meetings" : "Dictation").font(DesignSystem.font(20, weight: .bold))
+                Spacer()
+                Button { if model.sidebar == .meetings { model.meetingSetupPresented = true } else { model.startDictation() } } label: {
+                    Text("New").font(DesignSystem.font(14, weight: .semibold)).foregroundStyle(DesignSystem.link).frame(height: 28)
+                }.buttonStyle(.plain).disabled(model.isBusy)
+                    .help(model.sidebar == .meetings ? "New meeting" : "Start dictation")
+                    .accessibilityLabel(model.sidebar == .meetings ? "New meeting" : "Start dictation")
+            }
+            HStack(spacing: 8) {
+                DesignIcon(name: "history-imgIcon", size: 18)
+                TextField(model.sidebar == .meetings ? "Search meetings" : "Search dictations", text: $model.searchText).textFieldStyle(.plain).font(DesignSystem.font(15))
+                if !model.searchText.isEmpty { Button("Clear") { model.searchText = "" }.buttonStyle(.plain).font(DesignSystem.font(12)) }
+            }.padding(.horizontal, 16).frame(height: 44).background(DesignSystem.surface, in: Capsule())
+                .overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1))
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.filteredRecords) { record in
+                        Button { model.selectRecord(record.id) } label: { HistoryRow(record: record, selected: model.selectedRecordID == record.id) }.buttonStyle(.plain)
+                    }
+                    if model.filteredRecords.isEmpty { Text(model.searchText.isEmpty ? "No recordings yet" : "No results").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).padding(.vertical, 24) }
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: .infinity)
-                .help("Meeting: you + everyone on the call (You/Them transcript), needs Screen & System Audio permission. Just me: your voice only — notes, self-interviews.")
             }
-            recordButton(title: "Record", system: "record.circle", tint: .accentColor)
-            if !model.statusDetail.isEmpty {
-                Text(model.statusDetail).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            footer
-        }
+        }.padding(16).frame(width: model.sidebar == .meetings ? 308 : 340).frame(maxHeight: .infinity).background(DesignSystem.page)
     }
-
-    private var recording: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 9) {
-                Circle().fill(.red).frame(width: 10, height: 10)
-                Text(model.elapsedString)
-                    .font(.system(size: 34, weight: .light, design: .monospaced))
-                    .monospacedDigit()
-            }.padding(.top, 6)
-            if model.micOnly {
-                Text("Just me").font(.caption).foregroundStyle(.secondary)
-            }
-            recordButton(title: "Stop", system: "stop.fill", tint: .red)
-        }
-    }
-
-    private var transcribing: some View {
-        VStack(spacing: 10) {
-            ProgressView().controlSize(.large)
-            Text("Transcribing…").foregroundStyle(.secondary)
-        }.frame(maxWidth: .infinity).padding(.vertical, 10)
-    }
-
-    // MARK: reusable bits
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            if model.phase == .done {
-                Label("Saved", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green).font(.caption)
-            }
+    private var emptyDetail: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text(model.sidebar == .meetings ? "Meeting notes" : "Speak where you work").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
+            Text(model.sidebar == .meetings ? "Keep your notes, transcript and summary together." : "Double-tap Option to start and finish.").foregroundStyle(DesignSystem.muted)
+            Button(model.sidebar == .meetings ? "New meeting" : "Try a dictation") { if model.sidebar == .meetings { model.meetingSetupPresented = true } else { model.startDictation() } }
+                .buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(model.isBusy)
             Spacer()
-            Button("Recordings") { model.openFolder() }.font(.caption).buttonStyle(.link)
-            Button { model.showSettings?() } label: { Image(systemName: "gearshape") }
-                .buttonStyle(.borderless).help("Settings")
-        }
-    }
-
-    private func recordButton(title: String, system: String, tint: Color) -> some View {
-        Button { model.toggleRecord() } label: {
-            Label(title, systemImage: system).frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent).tint(tint).controlSize(.large)
-        .disabled(model.phase == .transcribing)
-    }
-
-    private func pickerRow<T: Hashable, Content: View>(
-        _ label: String, selection: Binding<T>, @ViewBuilder content: () -> Content) -> some View {
-        HStack {
-            Text(label).frame(width: 64, alignment: .leading).foregroundStyle(.secondary)
-            Picker("", selection: selection) { content() }.labelsHidden()
-        }
-    }
-
-    private func permissionRow(_ label: String, _ granted: Bool, grant: @escaping () -> Void) -> some View {
-        HStack {
-            Circle().fill(granted ? .green : .red).frame(width: 8, height: 8)
-            Text(label).font(.callout)
-            Spacer()
-            if !granted { Button("Grant", action: grant).controlSize(.small) }
-        }
+        }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
-/// Secure key entry (used in onboarding and Settings).
-struct KeyField: View {
-    @EnvironmentObject var model: AppModel
-    @State private var text = ""
-    var onSaved: (() -> Void)? = nil
-    private var usesProxy: Bool { Config.proxyBaseURL != nil }
-    private var checking: Bool { model.keyStatus == .checking }
+struct HistoryRow: View {
+    let record: SessionRecord
+    let selected: Bool
     var body: some View {
-        HStack {
-            SecureField(usesProxy ? "team token" : "sk-…", text: $text)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit(save)
-            Button(checking ? "Saving…" : "Save", action: save)
-                .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty || checking)
-        }
-    }
-    private func save() {
-        let value = text
-        Task {
-            if await model.saveAndVerifyKey(value) {
-                text = ""
-                onSaved?()
-            }
-        }
+        VStack(alignment: .leading, spacing: 8) {
+            Text(record.title).font(DesignSystem.font(15, weight: .semibold)).lineLimit(2)
+            Text(record.hasText ? record.transcript : record.canRecover ? "Recording available for transcription." : record.preview).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).lineLimit(2)
+            Text("\(record.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(duration(record.duration)) · \(record.statusLabel)").font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted).lineLimit(2)
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? DesignSystem.selected : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+            .contentShape(RoundedRectangle(cornerRadius: 12)).accessibilityElement(children: .combine)
     }
 }
 
-/// One-line status for the stored key/token (fingerprint + verification state).
-struct KeyStatusLabel: View {
+struct DictationDetailView: View {
     @EnvironmentObject var model: AppModel
+    let record: SessionRecord
     var body: some View {
-        switch model.keyStatus {
-        case .checking:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("verifying…").foregroundStyle(.secondary) }
-        case .rejected:
-            Text("✗ token not recognized").foregroundStyle(.red)
-        case .verified:
-            Text("✓ verified").foregroundStyle(.green)
-        case .savedUnverified:
-            Text("saved — couldn't verify (offline?)").foregroundStyle(.secondary)
-        case .idle:
-            if let fp = model.keyFingerprint {
-                Text("•••• \(fp) stored").foregroundStyle(.secondary)
-            } else {
-                Text("not set").foregroundStyle(.secondary)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                EditableRecordTitle(record: record).id(record.id)
+                Text(record.startedAt.formatted(date: .abbreviated, time: .shortened) + " · " + duration(record.duration)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+                StatusPill(title: record.statusLabel, color: record.isPartial ? DesignSystem.warning : DesignSystem.muted, background: record.isPartial ? DesignSystem.warningBackground : DesignSystem.subtle)
+                if !record.issues.isEmpty { RecordIssuesView(record: record) }
+                Text(record.transcript.isEmpty ? record.preview : record.transcript).font(DesignSystem.font(16)).foregroundStyle(DesignSystem.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 12) {
+                    if record.hasText {
+                        Button("Copy") { model.copyTranscript(record.id) }.buttonStyle(CirclesButtonStyle(primary: true))
+                        Button("Export") { model.export(record.id) }.buttonStyle(CirclesButtonStyle())
+                    }
+                    if record.canRecover {
+                        Button(record.status == .cancelled ? "Recover" : "Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle(primary: !record.hasText))
+                    }
+                }
+                if record.hasText && model.pasteLastShortcutEnabled {
+                    HStack(spacing: 8) { StatusPill(title: "⌥ ⇧ V"); Text("Paste last dictation").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted) }
+                }
+            }.padding(32)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct EditableRecordTitle: View {
+    @EnvironmentObject var model: AppModel
+    let record: SessionRecord
+    @State private var title = ""
+    @FocusState private var focused: Bool
+    var body: some View {
+        TextField("Untitled", text: $title).textFieldStyle(.plain).font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
+            .onAppear { title = record.title }.onChange(of: record.id) { _ in title = record.title }
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { active in if !active { commit() } }
+            .onDisappear(perform: commit)
+            .accessibilityLabel("Recording title")
+    }
+    private func commit() {
+        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { title = record.title }
+        else if value != record.title { model.updateTitle(record.id, value) }
+    }
+
+}
+
+struct RecordIssuesView: View {
+    let record: SessionRecord
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if record.isPartial { Text("Partial transcript").font(DesignSystem.font(15, weight: .semibold)) }
+            ForEach(Array(record.issues.enumerated()), id: \.offset) { _, issue in Text(issue).font(DesignSystem.font(13)) }
+        }.foregroundStyle(DesignSystem.warning).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(DesignSystem.warningBackground, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+extension SessionRecord {
+    var statusLabel: String {
+        switch status {
+        case .starting: return "Starting"
+        case .recording: return "Recording"
+        case .processing: return "Transcribing"
+        case .partial: return "Partial"
+        case .cancelled: return "Recoverable"
+        case .failed: return "Retry needed"
+        case .complete:
+            if kind == .meeting { return "Complete" }
+            switch delivery { case .inserted: return "Inserted"; case .cancelled: return "Saved"; default: return "Ready to copy" }
         }
     }
+}
+func duration(_ seconds: Double) -> String {
+    let n = max(0, Int(seconds)); return "\(n / 60):\(String(format: "%02d", n % 60))"
 }

@@ -1,9 +1,14 @@
 import AVFoundation
 import Foundation
 
-public struct AudioChunk: Sendable {
+public struct AudioChunk: Codable, Sendable {
     public let url: URL
     public let offset: Double   // seconds, start on the source timeline
+    public let duration: Double
+    public let digest: String?
+    public init(url: URL, offset: Double, duration: Double, digest: String? = nil) {
+        self.url = url; self.offset = offset; self.duration = duration; self.digest = digest
+    }
 }
 
 private let outSampleRate = 16_000.0
@@ -16,6 +21,9 @@ private let outSampleRate = 16_000.0
 /// timestamps.
 public func segmentTrack(srcWAV: URL, outDir: URL, prefix: String,
                          chunkSeconds: Double = 1200) throws -> [AudioChunk] {
+    guard chunkSeconds.isFinite, chunkSeconds > 0, chunkSeconds <= 1200 else {
+        throw RuntimeError("Invalid audio chunk duration.")
+    }
     let inFile = try AVAudioFile(forReading: srcWAV)
     let inFormat = inFile.processingFormat
     guard inFile.length > 0,
@@ -31,6 +39,7 @@ public func segmentTrack(srcWAV: URL, outDir: URL, prefix: String,
     var chunks: [AudioChunk] = []
     var outFile: AVAudioFile?
     var framesInChunk: AVAudioFrameCount = 0
+    var totalFrames: Int64 = 0
 
     func rollChunkIfNeeded() throws {
         if outFile == nil || framesInChunk >= framesPerChunk {
@@ -47,12 +56,13 @@ public func segmentTrack(srcWAV: URL, outDir: URL, prefix: String,
                 AVEncoderBitRateKey: 32_000,
             ]
             outFile = try AVAudioFile(forWriting: url, settings: settings)
-            chunks.append(AudioChunk(url: url, offset: Double(chunks.count) * chunkSeconds))
+            chunks.append(AudioChunk(url: url, offset: Double(totalFrames) / outSampleRate, duration: 0))
             framesInChunk = 0
         }
     }
 
     var inputDone = false
+    var readFailed = false
     while true {
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outBlockFrames)
         else { break }
@@ -61,20 +71,30 @@ public func segmentTrack(srcWAV: URL, outDir: URL, prefix: String,
             if inputDone { outStatus.pointee = .endOfStream; return nil }
             guard let inBuf = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: inBlockFrames)
             else { outStatus.pointee = .endOfStream; inputDone = true; return nil }
+            let remaining = inFile.length - inFile.framePosition
+            guard remaining > 0 else { outStatus.pointee = .endOfStream; inputDone = true; return nil }
+            let toRead = AVAudioFrameCount(min(Int64(inBlockFrames), remaining))
             do {
-                try inFile.read(into: inBuf, frameCount: inBlockFrames)
+                try inFile.read(into: inBuf, frameCount: toRead)
             } catch {
+                readFailed = true
                 outStatus.pointee = .endOfStream; inputDone = true; return nil
             }
             if inBuf.frameLength == 0 { outStatus.pointee = .endOfStream; inputDone = true; return nil }
             outStatus.pointee = .haveData
             return inBuf
         }
+        if readFailed { throw RuntimeError("Recorded audio could not be read.") }
         if let convError { throw RuntimeError("convert failed: \(convError.localizedDescription)") }
         if outBuf.frameLength > 0 {
             try rollChunkIfNeeded()
             try outFile?.write(from: outBuf)
             framesInChunk += outBuf.frameLength
+            totalFrames += Int64(outBuf.frameLength)
+            if let last = chunks.last {
+                chunks[chunks.count - 1] = AudioChunk(url: last.url, offset: last.offset,
+                                                    duration: Double(framesInChunk) / outSampleRate)
+            }
         }
         if status == .endOfStream { break }
         if status == .error { throw RuntimeError("converter error") }

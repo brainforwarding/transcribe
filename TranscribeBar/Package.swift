@@ -15,7 +15,7 @@ let package = Package(
         // Headless CLI: `transcribe` (the §12 go/no-go gate) and `selftest` (merge tests).
         .executableTarget(name: "transcribe-core", dependencies: ["TranscribeCore"]),
         // The SwiftUI menu-bar app (packaged into Transcribe.app at §13.5).
-        .executableTarget(name: "TranscribeApp", dependencies: ["TranscribeCore"]),
+        .executableTarget(name: "TranscribeApp", dependencies: ["TranscribeCore"], resources: [.process("Resources")]),
         // NOTE: deterministic merge tests live in TranscribeCore/Selftest.swift and run via
         // `swift run transcribe-core selftest` (no XCTest, so they work without full Xcode).
     ]
