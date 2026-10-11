@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0 is undergoing local signed-app validation. Notarized publication is pending the Apple notarization profile. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
+Version 2.0.4 passes local signed-app validation, with automatic dictation paste physically verified in Gmail in Chrome and in Terminal without submission. Notarized publication is pending the Apple notarization profile. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
 
 ```bash
 cd TranscribeBar
