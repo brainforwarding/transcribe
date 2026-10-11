@@ -2,7 +2,7 @@
 
 A Mac app that turns speech into text. Use it to dictate into any app, or to record a meeting and get a transcript and notes.
 
-**[Download Transcribe 2.0.8 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.8/Transcribe.dmg)** 路 Apple Silicon, macOS 13 or later 路 signed and notarized
+**[Download Transcribe 2.0.9 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.9/Transcribe.dmg)** 路 Apple Silicon, macOS 13 or later 路 signed and notarized
 
 ## Dictation
 
@@ -14,7 +14,7 @@ A dictation can last up to five minutes. If a paste goes wrong, Option鈥揝hift鈥
 
 ## Meetings
 
-Record an online call (your microphone plus the audio playing on your Mac) or an in-person conversation (microphone only). You can write your own notes while it records. When you finish, you get the full transcript and a summary of decisions and next steps with links back to supporting transcript passages.
+Record an online call (your microphone plus the audio playing on your Mac) or an in-person conversation (microphone only). Read the live transcript and write your own notes while it records. Confirmed passages stay unchanged. When you finish, get a separate summary of decisions and next steps with links back to supporting transcript passages.
 
 <img src="docs/assets/meetings.svg" alt="A meeting is recorded with a live transcript beside your notes, then becomes a summary with decisions and next steps linked to the transcript." width="100%">
 
@@ -28,6 +28,8 @@ Record an online call (your microphone plus the audio playing on your Mac) or an
    - **Screen & System Audio Recording**, only for online meetings. You may need to quit and reopen Transcribe after granting it.
 
 Audio and text needed for transcription, formatting and meeting notes are sent to OpenAI. Your history is stored on your Mac. Tell people before you record them.
+
+Install 2.0.9 manually once. Future versions appear as a small **Actualizar** button that downloads, installs and restarts the app.
 
 ## More
 
