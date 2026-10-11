@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import Security
+import AppKit
 
 @main
 struct NativeSelftest {
@@ -10,7 +11,7 @@ struct NativeSelftest {
         guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
     }
 
-    static func main() {
+    @MainActor static func main() async {
         var taps = OptionTapRecognizer()
         check(!taps.flagsChanged(optionDown: true, otherModifiers: false, keyCode: 58, at: 1), "Option down does not start")
         check(!taps.flagsChanged(optionDown: false, otherModifiers: false, keyCode: 58, at: 1.1), "First tap does not start")
@@ -123,6 +124,123 @@ struct NativeSelftest {
         check(denied.cachedReadStatus == errSecInteractionNotAllowed, "Denied cache exposes safe access-required status")
         check(denied.unlock() != nil && denied.get() != nil && deniedModes == [false, true], "Only deliberate unlock retries interactively and then caches")
         check(denied.cachedReadStatus == errSecSuccess, "Successful deliberate unlock clears denied status")
-        print("Native shortcut/cache selftest passed (\(checks) checks)")
+        check(Keychain.account(for: .team) == "openai-api-key", "Legacy Team Keychain account remains unchanged")
+        check(Keychain.account(for: .openAI) != Keychain.account(for: .team), "Direct key uses a distinct account")
+        var providerReads: [ConnectionProvider: Int] = [:]
+        var providerWrites: [ConnectionProvider] = []
+        let vault = CredentialVault(read: { provider, _ in
+            providerReads[provider, default: 0] += 1
+            return provider == .team ? .value("local-test-team") : .missing
+        }, write: { provider, _ in providerWrites.append(provider) })
+        check(vault.fingerprint(.team) == nil && vault.fingerprint(.openAI) == nil && providerReads.isEmpty,
+              "Rendering provider metadata never reads either credential")
+        check(vault.get(.team) == "local-test-team" && vault.get(.team) == "local-test-team" && providerReads[.team] == 1,
+              "Legacy Team cache loads once without touching direct account")
+        check(vault.get(.openAI) == nil && vault.get(.openAI) == nil && providerReads[.openAI] == 1,
+              "Direct missing result caches independently")
+        do { try vault.set("local-test-direct", for: .openAI) } catch { check(false, "Synthetic direct save failed") }
+        check(providerWrites == [.openAI] && vault.get(.team) == "local-test-team" && vault.get(.openAI) == "local-test-direct",
+              "Direct save cannot alter or replace the legacy Team value")
+        check(vault.status(.team) == errSecSuccess && vault.status(.openAI) == errSecSuccess,
+              "Status belongs to each selected provider cache")
+        let blockedVault = CredentialVault(read: { provider, _ in
+            provider == .team ? .blocked(errSecInteractionNotAllowed) : .value("local-test-direct")
+        }, write: { _, _ in })
+        check(blockedVault.get(.team) == nil && blockedVault.get(.openAI) != nil,
+              "A blocked Team account cannot block or populate direct account")
+        check(blockedVault.status(.team) == errSecInteractionNotAllowed && blockedVault.status(.openAI) == errSecSuccess,
+              "Blocked status does not leak between providers")
+        await pasteChecks()
+        print("Native shortcut/cache/paste selftest passed (\(checks) checks)")
+    }
+
+    @MainActor static func pasteChecks() async {
+        func editable(_ role: String? = kAXTextAreaRole, _ subrole: String? = nil,
+                      _ protected: Bool? = nil, _ enabled: Bool? = true,
+                      _ explicit: Bool? = nil, _ writable: Bool = true) -> Bool {
+            PasteTargetPolicy.isEditable(role: role, subrole: subrole, protected: protected, enabled: enabled,
+                explicitEditable: explicit, selectedTextWritable: writable, valueWritable: false)
+        }
+        check(editable(), "Positive writable text area is eligible")
+        check(!editable(kAXTextFieldRole, kAXSecureTextFieldSubrole), "Secure input is rejected")
+        check(!editable(kAXTextAreaRole, nil, true), "Protected input is rejected")
+        check(!editable(kAXTextAreaRole, nil, nil, false), "Disabled input is rejected")
+        check(!editable(kAXTextAreaRole, nil, nil, true, false), "Explicit read-only input overrides writable metadata")
+        check(!editable(kAXTextAreaRole, nil, nil, true, nil, false), "Selectable text alone is not editable")
+        check(!editable("AXWebArea"), "Web container cannot receive a paste")
+        check(editable(kAXTextFieldRole, nil, nil, true, true, false), "Explicit editability is accepted without AX setter")
+
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let binaryType = NSPasteboard.PasteboardType("com.transcribe.selftest.binary")
+        let binary = Data([0, 255, 17, 128])
+        func original() {
+            board.clearContents()
+            let first = NSPasteboardItem(); first.setString("original", forType: .string); first.setData(binary, forType: binaryType)
+            let second = NSPasteboardItem(); second.setString("second", forType: .string)
+            check(board.writeObjects([first, second]), "Named clipboard fixture can be written")
+        }
+        original()
+        let transaction = PasteboardTransaction(board: board)!
+        check(transaction.write("synthetic transcript"), "Temporary transcript writes to named clipboard")
+        check(transaction.restoreIfOwned(), "Owned clipboard restores")
+        check(board.pasteboardItems?.count == 2 && board.pasteboardItems?.first?.data(forType: binaryType) == binary
+              && board.pasteboardItems?.last?.string(forType: .string) == "second", "All formats and multiple clipboard items survive")
+        let lost = PasteboardTransaction(board: board)!
+        check(lost.write("temporary"), "Ownership test writes temporary text")
+        board.clearContents(); board.setString("new user copy", forType: .string)
+        check(!lost.restoreIfOwned() && board.string(forType: .string) == "new user copy", "A newer user clipboard owner is never overwritten")
+
+        var posts = 0
+        let engine = CurrentCaretPasteTransaction(board: board, wait: {})
+        let denied = await engine.run("synthetic", canDeliver: { false }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { false })
+        if case .ready = denied { check(posts == 0 && board.string(forType: .string) == "new user copy", "Revoked delivery emits zero keys and leaves clipboard alone") }
+        else { check(false, "Revoked delivery must be ready") }
+
+        var targetChecks = 0
+        let changed = await engine.run("synthetic", canDeliver: { true }, targetStillValid: {
+            targetChecks += 1; return targetChecks < 3
+        }, postPaste: { posts += 1 }, verify: { false })
+        if case .ready = changed { check(posts == 0 && board.string(forType: .string) == "new user copy", "Focus invalidation after clipboard write restores without key posts") }
+        else { check(false, "Invalidated predispatch target must be ready") }
+
+        let confirmed = await engine.run("synthetic", canDeliver: { true }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { true })
+        check(confirmed == .inserted && posts == 1 && board.string(forType: .string) == "new user copy", "Confirmed consumption restores original clipboard")
+
+        let cancelledTask = Task { @MainActor in
+            await engine.run("synthetic", canDeliver: { true }, targetStillValid: { true }, postPaste: {
+                posts += 1; withUnsafeCurrentTask { $0?.cancel() }
+            }, verify: { false })
+        }
+        let cancelledOutcome = await cancelledTask.value
+        if case .unconfirmed = cancelledOutcome { check(posts == 2 && board.string(forType: .string) == "synthetic", "Cancellation after dispatch retains transcript for a delayed receiver") }
+        else { check(false, "Dispatched cancelled paste remains unconfirmed") }
+
+        var polls = 0
+        let newOwnerEngine = CurrentCaretPasteTransaction(board: board, wait: {
+            board.clearContents(); board.setString("newer clipboard", forType: .string)
+        })
+        let newer = await newOwnerEngine.run("synthetic", canDeliver: { true }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { polls += 1; return polls > 1 })
+        check(newer == .inserted && board.string(forType: .string) == "newer clipboard", "Ownership change during confirmation wait prevents restoration")
+        let unconfirmedNewOwner = await newOwnerEngine.run("synthetic", canDeliver: { true }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { false })
+        if case .unconfirmed(let reason) = unconfirmedNewOwner {
+            check(!reason.contains("remains on the clipboard") && board.string(forType: .string) == "newer clipboard",
+                  "Unconfirmed delivery never falsely claims clipboard ownership after user copy")
+        } else { check(false, "Unverified delivery must remain unconfirmed") }
+
+        var blocked: CheckedContinuation<Void, Never>?
+        let overlapEngine = CurrentCaretPasteTransaction(board: board, wait: {
+            if blocked == nil { await withCheckedContinuation { blocked = $0 } }
+        })
+        let first = Task { @MainActor in
+            await overlapEngine.run("first synthetic", canDeliver: { true }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { false })
+        }
+        while blocked == nil { await Task.yield() }
+        let beforeOverlap = posts
+        let second = await overlapEngine.run("second synthetic", canDeliver: { true }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { true })
+        if case .unconfirmed = second { check(posts == beforeOverlap && board.string(forType: .string) == "first synthetic", "Overlapping paste cannot replace in-flight clipboard or send extra keys") }
+        else { check(false, "Overlapping delivery must be blocked") }
+        blocked?.resume()
+        _ = await first.value
     }
 }

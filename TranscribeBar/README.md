@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0 passes local builds, regression checks and signed-artifact launch validation. Authenticated transcription testing and notarized publication are deferred until the existing team token and Apple notarization profile are available. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
+Version 2.0 is undergoing local signed-app validation. Notarized publication is pending the Apple notarization profile. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
 
 ```bash
 cd TranscribeBar
@@ -16,7 +16,9 @@ The app lives in the menu bar. Open Transcribe for history, meetings, dictionary
 
 ## Connect
 
-This build uses the existing shared proxy. Enter your **personal team token** in Settings; you do not need a local OpenAI API key or environment file. The token is stored in the macOS Keychain. Development credentials remain canonical in 1Password.
+Open **Settings → Connection** and choose **OpenAI** to enter your own OpenAI API key. No shared account, team invitation or environment file is required. OpenAI charges your API account for usage. Connection checking verifies access to the dictation model; meeting transcription and summaries also require access to their respective models.
+
+If you already have a personal token for this app's shared proxy, choose **Team** instead. Existing installations retain their Team connection. The app stores each credential separately in the macOS Keychain and sends it only to its selected provider. Switching connections preserves both saved credentials. Development credentials remain canonical in 1Password.
 
 Allow Microphone for recording and Accessibility for double Option and cursor insertion. Online meetings additionally need Screen & System Audio Recording. macOS may require quitting and reopening after granting that permission. In-person meetings and dictation only use the microphone.
 
@@ -26,7 +28,8 @@ Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac
 
 - Double-tap Option to start. Tap Option once to finish. A small chip shows input and elapsed time.
 - At 4:30 the chip shows the 30-second warning. Recording stops at five minutes.
-- Text inserts into the original field only if its app, field, value and selection are still valid. Otherwise it stays ready to copy.
+- When transcription finishes, the app pastes into the currently focused editable field using Command–V. Keep the intended field focused until it finishes. Secure fields and terminals are excluded.
+- Your previous clipboard is restored after insertion is confirmed, unless you changed it in the meantime. If confirmation is unavailable, the transcript stays on the clipboard and in history; check the field before pasting again.
 - Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.
 - Option–Shift–V pastes the last dictation at the current editable cursor. Disable this shortcut in Settings if needed. The menu and history also provide copy actions.
 

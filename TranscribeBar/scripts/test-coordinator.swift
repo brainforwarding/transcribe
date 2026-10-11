@@ -1,5 +1,40 @@
 import Foundation
 import TranscribeCore
+import Security
+
+/// Requests are intercepted before any network operation or real credential access.
+private final class ProviderProbeProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var replies: Int? = 200
+    private static var recorded: [URLRequest] = []
+    private static var pending: [ProviderProbeProtocol] = []
+    static var requests: [URLRequest] { lock.withLock { recorded } }
+    static func reset(status: Int? = 200) { lock.withLock { replies = status; recorded = []; pending = [] } }
+    static func finish(status: Int) {
+        let waiting = lock.withLock { let waiting = pending; pending = []; return waiting }
+        waiting.forEach { $0.respond(status) }
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let status = Self.lock.withLock { () -> Int? in
+            Self.recorded.append(request)
+            if Self.replies == nil { Self.pending.append(self) }
+            return Self.replies
+        }
+        if let status { respond(status) }
+    }
+    private func respond(_ status: Int) {
+        if status == -1 {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return
+        }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status,
+            httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"id":"local-model-fixture"}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
 
 /// Standalone CLT runner. Every command under test is the actual AppModel command.
 @MainActor
@@ -38,8 +73,19 @@ private final class Fixture {
     let store: SessionStore
     let preferenceDomain = "Transcribe.CoordinatorTests." + UUID().uuidString
     let preferences: UserDefaults
+    let credentialVault: CredentialVault
+    let credentialAccess: CredentialAccess
+    let verificationSession: URLSession
+    var seenProvider: ConnectionProvider?
+    var seenConfig: OpenAIConfig?
     let startup = Gate()
     let processing = Gate()
+    let delivery = Gate()
+    var blocksDelivery = false
+    var currentFocus = "Field A"
+    var deliveredFocus: String?
+    var deliveryWrites = 0
+    var deliveryCompletions = 0
     var model: AppModel!
     var now = 10_000.0
     var starts = 0
@@ -58,11 +104,23 @@ private final class Fixture {
     var manualOutcome: PasteService.Outcome = .inserted
     var levelCallback: (@Sendable (Source, Double) -> Void)?
 
-    init() throws {
+    init(legacyCredential: CredentialSession.ReadResult = .missing, storedProvider: ConnectionProvider? = nil,
+         existingConsent: Bool = false) throws {
+        credentialVault = CredentialVault(read: { provider, _ in provider == .team ? legacyCredential : .value("local-test-direct") },
+                                          write: { _, _ in })
+        let vault = credentialVault
+        credentialAccess = CredentialAccess(get: { vault.get($0) }, unlock: { vault.unlock($0) },
+            set: { try vault.set($0, for: $1) }, status: { vault.status($0) }, fingerprint: { vault.fingerprint($0) },
+            legacyConfigured: { _ = vault.get(.team); return vault.status(.team) != errSecItemNotFound })
+        ProviderProbeProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ProviderProbeProtocol.self]
+        verificationSession = URLSession(configuration: configuration)
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("transcribe-coordinator-" + UUID().uuidString)
         store = try SessionStore(root: folder.appendingPathComponent("sessions"))
         preferences = UserDefaults(suiteName: preferenceDomain)!
-        preferences.set(true, forKey: "consentAccepted")
+        if let storedProvider { preferences.set(storedProvider.rawValue, forKey: "connectionProvider") }
+        preferences.set(existingConsent, forKey: "consentAccepted")
         preferences.set(false, forKey: "keepAudio")
         preferences.set(false, forKey: "includeSummary")
         preferences.set(folder.appendingPathComponent("exports").path, forKey: "saveFolderPath")
@@ -80,11 +138,14 @@ private final class Fixture {
                 return AppModel.CaptureSession.Output(tracks: [SessionAudioTrack(source: .mic,
                     spans: [AudioSpan(url: raw, offset: 0, duration: 2)])], issues: [])
             }, retrySystemAudio: {})
-        }, transcribe: { [self] _, _, _ in
+        }, transcribe: { [self] _, _, config in
+            seenConfig = config
             transcriptionRequests += 1; await processing.wait()
             return FinalTranscription(text: "Saved speech", segments: [], complete: true, issues: [])
-        }, uptime: { [self] in now }, credentials: {
-            OpenAIConfig(baseURL: URL(string: "https://example.invalid/v1")!, authValue: "Bearer local-test-fixture")
+        }, uptime: { [self] in now }, credentials: { [self] provider in
+            seenProvider = provider
+            guard let credential = credentialVault.get(provider) else { throw CheckFailure(description: "Missing synthetic credential") }
+            return OpenAIConfig(baseURL: provider.baseURL, authValue: "Bearer " + credential)
         }, save: { [self] store, record in
             if recordingSaveFails && record.status == .recording { throw CocoaError(.fileWriteOutOfSpace) }
             if stopSaveFails && !record.tracks.isEmpty && !record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
@@ -92,21 +153,29 @@ private final class Fixture {
             try store.save(record)
         }, cleanAudio: { [self] store, record in
             cleanups += 1; try store.cleanAudio(for: record)
-        }, captureInsertion: { [self] in
-            return { [self] text in
+        }, deliverAtCurrentCaret: { [self] text, canDeliver in
+            let automatic = model.phase == .transcribing
+            let target = currentFocus
+            if automatic {
                 insertions += 1
                 insertedAfterDurableText = (try? store.load().first?.transcript) == text
-                return automaticOutcome
-            }
-        }, pasteAtCurrentCaret: { [self] _ in manualPastes += 1; return manualOutcome },
+            } else { manualPastes += 1 }
+            defer { deliveryCompletions += 1 }
+            if blocksDelivery { await delivery.wait() }
+            guard canDeliver() else { return .ready(reason: "Delivery was cancelled.") }
+            guard currentFocus == target else { return .ready(reason: "The focused field changed before paste.") }
+            deliveryWrites += 1; deliveredFocus = target
+            return automatic ? automaticOutcome : manualOutcome
+        },
         copy: { [self] _ in copies += 1 }, automaticTimer: false)
-        model = AppModel(store: store, operations: operations, preferences: preferences, initializeSystemState: false)
-        model.micGranted = true; model.hasKey = true
+        model = AppModel(store: store, operations: operations, preferences: preferences, initializeSystemState: false,
+            credentialAccess: credentialAccess, verificationSession: verificationSession)
+        model.micGranted = true; model.acceptConsent()
     }
     func close() async {
-        startup.release(); processing.release()
+        startup.release(); processing.release(); delivery.release()
         await model?.prepareToQuit()
-        model = nil
+        model = nil; verificationSession.invalidateAndCancel()
         preferences.removePersistentDomain(forName: preferenceDomain)
         try? FileManager.default.removeItem(at: folder)
     }
@@ -117,6 +186,11 @@ private final class Fixture {
     func beginProcessing() async throws {
         try await beginRecording(); model.finishRecording()
         try await until("processing request") { processing.entered }
+    }
+    func pasteLast() async throws {
+        let previous = deliveryCompletions
+        model.pasteLast()
+        try await until("manual paste completion") { deliveryCompletions > previous }
     }
     func audioExists() -> Bool { artifact.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
     func addHistoricalRecord(status: SessionStatus = .complete) throws -> UUID {
@@ -135,6 +209,90 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
+            ("Provider defaults preserve legacy accounts without guessing credential contents", { f in
+                try check(f.model.connectionProvider == .openAI, "Fresh users must default to direct OpenAI")
+                let fixtures: [(CredentialSession.ReadResult, Bool, ConnectionProvider?, ConnectionProvider)] = [
+                    (.value("local-test-team"), false, nil, .team),
+                    (.blocked(errSecInteractionNotAllowed), false, nil, .team),
+                    (.missing, true, nil, .team),
+                    (.value("local-test-team"), true, .openAI, .openAI)
+                ]
+                for (legacy, consent, explicit, expected) in fixtures {
+                    let other = try Fixture(legacyCredential: legacy, storedProvider: explicit, existingConsent: consent)
+                    do {
+                        try check(other.model.connectionProvider == expected, "Existing, blocked and explicitly selected providers must retain their route")
+                        if case .blocked = legacy {
+                            try check(other.model.tokenAccessRequired && !other.model.hasKey, "Blocked legacy Team account must offer Unlock without switching providers")
+                        }
+                        try check(other.preferences.string(forKey: "connectionProvider") == expected.rawValue, "Resolved provider must persist as ordinary preference")
+                    } catch { await other.close(); throw error }
+                    await other.close()
+                }
+            }),
+            ("Direct validation and transcription use only the direct credential", { f in
+                let saved = await f.model.saveAndVerifyKey("local-test-new-direct")
+                try check(saved && f.model.keyStatus == .verified, "Direct model probe 200 must verify saved credential")
+                let request = ProviderProbeProtocol.requests.first!
+                try check(request.url?.absoluteString == "https://api.openai.com/v1/models/gpt-transcribe" && request.httpMethod == "GET" && request.httpBody == nil,
+                          "Direct verification must be a no-generation model GET")
+                try check(request.value(forHTTPHeaderField: "Authorization") == "Bearer local-test-new-direct", "Direct request must use its own account")
+                try await f.beginProcessing(); f.processing.release()
+                try await until("direct transcription completed") { f.model.phase == .done }
+                try check(f.seenProvider == .openAI && f.seenConfig?.baseURL == Config.openAIBaseURL && f.seenConfig?.authValue == "Bearer local-test-new-direct",
+                          "Final transcription must use selected direct endpoint and direct credential")
+                try check(f.credentialVault.get(.team) == nil, "Saving a direct key must not create or modify Team credential")
+            }),
+            ("Team verification preserves its legacy probe and account", { f in
+                f.model.setConnectionProvider(.team); ProviderProbeProtocol.reset(status: 403)
+                let saved = await f.model.saveAndVerifyKey("local-test-new-team")
+                try check(saved && f.model.keyStatus == .verified, "Authenticated legacy Team probe 403 must remain verified")
+                let request = ProviderProbeProtocol.requests.first!
+                try check(request.url?.host == Config.teamBaseURL.host && request.httpMethod == "POST" && (request.httpBody != nil || request.httpBodyStream != nil),
+                          "Team validation must remain on its fixed proxy")
+                try check(request.value(forHTTPHeaderField: "Authorization") == "Bearer local-test-new-team", "Team request must use only Team credential")
+                f.model.setConnectionProvider(.openAI)
+                try check(f.model.keyFingerprint == "rect" && f.credentialVault.get(.openAI) == "local-test-direct",
+                          "Switching from Team must restore direct cached metadata without altering its key")
+                f.model.setConnectionProvider(.team)
+                try check(f.model.keyStatus == .verified && f.model.keyFingerprint == "team", "Provider status and fingerprint must remain scoped")
+                try await f.beginProcessing(); f.processing.release()
+                try await until("Team transcription completed") { f.model.phase == .done }
+                try check(f.seenProvider == .team && f.seenConfig?.baseURL == Config.teamBaseURL && f.seenConfig?.authValue == "Bearer local-test-new-team",
+                          "Team transcription must use only the Team endpoint and Team account")
+            }),
+            ("Direct verification distinguishes rejection from uncertain capability", { f in
+                for (code, expected) in [(401, AppModel.KeyStatus.rejected), (403, .savedUnverified), (404, .savedUnverified), (429, .savedUnverified), (-1, .savedUnverified)] {
+                    ProviderProbeProtocol.reset(status: code)
+                    _ = await f.model.saveAndVerifyKey("local-test-direct")
+                    try check(f.model.keyStatus == expected, "Only direct401 is known authentication rejection; unavailable model/permission remains unverified")
+                }
+            }),
+            ("Connection commands block concurrent validation and capture", { f in
+                ProviderProbeProtocol.reset(status: nil)
+                let saving = Task { await f.model.saveAndVerifyKey("local-test-direct") }
+                try await until("pending verification") { ProviderProbeProtocol.requests.count == 1 }
+                f.model.setConnectionProvider(.team); f.model.unlockToken()
+                let second = await f.model.saveAndVerifyKey("local-test-second")
+                try check(!second && f.model.connectionProvider == .openAI && ProviderProbeProtocol.requests.count == 1,
+                          "Checking must guard provider changes, unlock and duplicate saves in the model")
+                ProviderProbeProtocol.finish(status: 200); _ = await saving.value
+                try await f.beginRecording()
+                f.model.setConnectionProvider(.team); f.model.unlockToken()
+                let busySave = await f.model.saveAndVerifyKey("local-test-busy")
+                try check(!busySave && f.model.connectionProvider == .openAI, "Capture must freeze endpoint/account selection and writes")
+                f.model.cancelDictation(); try await until("provider guard capture stop") { f.model.phase == .done }
+            }),
+            ("Stale verification cannot update a different provider", { f in
+                ProviderProbeProtocol.reset(status: nil)
+                let saving = Task { await f.model.saveAndVerifyKey("local-test-direct") }
+                try await until("pending stale verification") { ProviderProbeProtocol.requests.count == 1 }
+                // Simulate a stale view resetting display status. Request-generation and
+                // provider snapshot still protect the selected account after the await.
+                f.model.keyStatus = .idle; f.model.setConnectionProvider(.team)
+                ProviderProbeProtocol.finish(status: 200); _ = await saving.value
+                try check(f.model.connectionProvider == .team && f.model.keyStatus == .idle && !f.model.hasKey,
+                          "Late direct verification must not verify or populate the Team account")
+            }),
             ("Checking or rejected tokens cannot begin capture", { f in
                 f.model.keyStatus = .checking; f.model.startDictation()
                 f.model.keyStatus = .rejected; f.model.startDictation()
@@ -208,6 +366,43 @@ struct CoordinatorSelftest {
                 try check(f.insertions == 1 && f.insertedAfterDurableText, "Automatic insertion must follow durable final text")
                 try check(f.cleanups == 1 && !f.audioExists(), "Successful owned audio cleanup must occur after delivery")
             }),
+            ("Automatic paste targets focus at final completion", { f in
+                try await f.beginProcessing()
+                try check(f.insertions == 0, "Recording and processing must not capture or paste into a destination")
+                f.currentFocus = "Field B"; f.processing.release()
+                try await until("current focus completion") { f.model.phase == .done }
+                try check(f.deliveryWrites == 1 && f.deliveredFocus == "Field B" && f.insertedAfterDurableText,
+                          "Final durable text must paste once at the current completion-time caret")
+            }),
+            ("Escape while delivery waits prevents its final write", { f in
+                f.blocksDelivery = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("pending delivery") { f.delivery.entered }
+                try check(f.model.phase == .transcribing && f.insertedAfterDurableText,
+                          "Final text must already be durable while asynchronous delivery stays busy")
+                f.model.cancelDictation(); f.delivery.release()
+                try await until("cancelled delivery completion") { f.model.phase == .done }
+                let saved = try f.store.load().first
+                try check(f.deliveryWrites == 0 && f.copies == 0 && f.cleanups == 0 && f.audioExists(),
+                          "The final delivery guard must prevent writes and preserve cancelled audio")
+                try check(saved?.transcript == "Saved speech" && saved?.delivery == .cancelled && saved?.issues.isEmpty == true,
+                          "Late cancellation must preserve final text without delivery failure diagnostics")
+            }),
+            ("Manual delivery latch blocks duplicate paste and new capture", { f in
+                _ = try f.addHistoricalRecord(); f.blocksDelivery = true
+                f.model.pasteLast()
+                try await until("pending manual delivery") { f.delivery.entered }
+                f.model.pasteLast(); f.model.startDictation(); f.model.startMeeting()
+                f.model.setConnectionProvider(.team); f.model.unlockToken()
+                let busySave = await f.model.saveAndVerifyKey("local-test-busy-manual")
+                try check(f.manualPastes == 1 && f.starts == 0 && f.model.records.count == 1,
+                          "A pending manual paste must serialize clipboard ownership and prevent new capture")
+                try check(!busySave && f.model.connectionProvider == .openAI && ProviderProbeProtocol.requests.isEmpty,
+                          "Pending clipboard delivery must also block provider changes, unlock and key saves")
+                f.delivery.release()
+                try await until("manual delivery finished") { f.deliveryCompletions == 1 && f.model.chipState == .inserted }
+                try check(f.deliveryWrites == 1 && f.copies == 0, "Manual delivery must dispatch exactly once")
+            }),
             ("Monotonic 4:30 warning and five-minute hard stop", { f in
                 try await f.beginRecording()
                 f.now = 10_269.9; f.model.updateRecordingTime()
@@ -253,7 +448,7 @@ struct CoordinatorSelftest {
                 try check(saved?.status == .complete && saved?.delivery == .ready && saved?.issues == [reason],
                           "Capture failure reason must survive reload without claiming insertion")
                 try check(saved?.transcriptionIssues.isEmpty == true && saved?.isPartial == false &&
-                          f.model.statusDetail == reason && f.model.chipState == .ready,
+                          f.model.deliveryDetail == reason && f.model.statusDetail.isEmpty && f.model.chipState == .ready,
                           "Delivery diagnostics must not create partial transcription or retry eligibility")
             }),
             ("Unconfirmed automatic write remains saved without claiming insertion", { f in
@@ -265,39 +460,39 @@ struct CoordinatorSelftest {
                 try check(f.insertions == 1 && f.insertedAfterDurableText && f.copies == 0,
                           "An unconfirmed write must not automatically copy or retry")
                 try check(saved?.transcript == "Saved speech" && saved?.delivery == .ready &&
-                          saved?.issues == [reason] && f.model.statusDetail == reason,
+                          saved?.issues == [reason] && f.model.deliveryDetail == reason && f.model.statusDetail.isEmpty,
                           "Uncertainty must remain visible beside durable text without claiming verified insertion")
             }),
-            ("Definitively ready manual paste copies once and saves its reason", { f in
+            ("Unavailable manual paste preserves clipboard and saves its reason", { f in
                 let reason = "Select an editable field."
                 let id = try f.addHistoricalRecord(); f.manualOutcome = .ready(reason: reason)
-                f.model.pasteLast()
+                try await f.pasteLast()
                 let saved = try f.store.load().first { $0.id == id }
-                try check(f.manualPastes == 1 && f.copies == 1 && f.insertions == 0,
-                          "A manual command with no write may prepare exactly one explicit copy")
-                try check(saved?.issues == [reason] && f.model.statusDetail == reason,
+                try check(f.manualPastes == 1 && f.copies == 0 && f.insertions == 0,
+                          "A manual command with no write must leave the existing clipboard untouched")
+                try check(saved?.issues == [reason] && f.model.deliveryDetail == reason && f.model.statusDetail.isEmpty,
                           "Manual delivery diagnostics must survive reload")
-                f.model.pasteLast()
+                try await f.pasteLast()
                 let repeated = try f.store.load().first { $0.id == id }
-                try check(f.copies == 2 && repeated?.issues == [reason],
-                          "Each explicit command may copy once without duplicating its saved warning")
-                f.manualOutcome = .inserted; f.model.pasteLast()
+                try check(f.copies == 0 && repeated?.issues == [reason],
+                          "Repeated unavailable paste must preserve clipboard without duplicating its saved warning")
+                f.manualOutcome = .inserted; try await f.pasteLast()
                 let successful = try f.store.load().first { $0.id == id }
-                try check(f.model.statusDetail.isEmpty && f.model.chipState == .inserted &&
-                          f.copies == 2 && successful?.issues == [reason],
+                try check(f.model.deliveryDetail.isEmpty && f.model.statusDetail.isEmpty && f.model.chipState == .inserted &&
+                          f.copies == 0 && successful?.issues == [reason],
                           "Confirmed manual insertion must clear stale current feedback while retaining history")
             }),
             ("Unconfirmed manual write never copies or changes cancellation recovery", { f in
                 let reason = "Insertion unconfirmed. Check the original field before pasting again."
                 let id = try f.addHistoricalRecord(); f.manualOutcome = .unconfirmed(reason: reason)
-                f.model.pasteLast()
+                try await f.pasteLast()
                 let saved = try f.store.load().first { $0.id == id }
                 try check(f.manualPastes == 1 && f.copies == 0 && saved?.issues == [reason],
                           "Uncertain manual writes must leave the clipboard untouched and save their warning")
                 var cancelled = f.model.records[0]
                 cancelled.status = .cancelled; cancelled.delivery = .cancelled; cancelled.issues = []
                 try f.store.save(cancelled); f.model.records[0] = cancelled
-                f.model.pasteLast()
+                try await f.pasteLast()
                 let after = try f.store.load().first { $0.id == id }
                 try check(f.copies == 0 && after?.issues.isEmpty == true && after?.delivery == .cancelled,
                           "An explicit manual command must not contaminate cancelled-transcript recovery state")

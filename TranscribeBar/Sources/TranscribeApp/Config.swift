@@ -1,14 +1,29 @@
 import Foundation
 
-enum Config {
-    /// Auth mode. `nil` = per-user OpenAI key in the Keychain, called against
-    /// api.openai.com directly. When set to the deployed Cloudflare Worker URL, requests
-    /// route through the shared-key proxy: each person pastes their personal team token
-    /// (not an OpenAI key) where the app asks for the key, and the Worker swaps it for
-    /// the org key server-side (see proxy/README.md).
-    static let proxyBaseURL: URL? = URL(string: "https://transcribe-proxy.quiet-bush-25b1.workers.dev/v1")
+enum ConnectionProvider: String, CaseIterable, Identifiable {
+    case openAI, team
+    var id: String { rawValue }
+    var title: String { self == .openAI ? "OpenAI" : "Team" }
+    var credentialLabel: String { self == .openAI ? "OpenAI API key" : "Team token" }
+    var credentialPlaceholder: String { self == .openAI ? "OpenAI API key" : "Personal team token" }
+    var setupTitle: String { self == .openAI ? "Connect OpenAI" : "Connect your team" }
+    var baseURL: URL { self == .openAI ? Config.openAIBaseURL : Config.teamBaseURL }
 
-    static var apiBaseURL: URL {
-        proxyBaseURL ?? URL(string: "https://api.openai.com/v1")!
+    /// Verification checks access without creating audio or requesting generated text.
+    func verificationRequest(credential: String) -> URLRequest {
+        var request = URLRequest(url: baseURL.appendingPathComponent(self == .openAI ? "models/gpt-transcribe" : "chat/completions"))
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+        if self == .team {
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = #"{"model":"__verify__"}"#.data(using: .utf8)
+        } else { request.httpMethod = "GET" }
+        return request
     }
+}
+
+enum Config {
+    static let openAIBaseURL = URL(string: "https://api.openai.com/v1")!
+    static let teamBaseURL = URL(string: "https://transcribe-proxy.quiet-bush-25b1.workers.dev/v1")!
 }

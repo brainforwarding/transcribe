@@ -10,7 +10,7 @@ struct MeetingSetupView: View {
                 Text("New meeting").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
                 TextField("Meeting title", text: $model.meetingTitle).textFieldStyle(.plain).padding(.horizontal, 16).frame(height: 44)
                     .background(DesignSystem.surface, in: Capsule()).overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1))
-                Picker("Meeting mode", selection: $model.meetingMode) { Text("Online meeting").tag(MeetingMode.online); Text("In person").tag(MeetingMode.inPerson) }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 340)
+                Picker("Meeting mode", selection: $model.meetingMode) { Text("Online meeting").tag(MeetingMode.online); Text("In person").tag(MeetingMode.inPerson) }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 340, alignment: .leading)
                 HStack { DesignIcon(name: "meetingSetup-imgIconMicrophone1", size: 20); Text("Microphone").font(DesignSystem.font(15, weight: .semibold)); Spacer(); MicrophonePicker().frame(width: 250) }.padding(16).background(DesignSystem.page, in: RoundedRectangle(cornerRadius: 12))
                 if model.meetingMode == .online {
                     HStack {
@@ -26,7 +26,6 @@ struct MeetingSetupView: View {
                     Button("Start meeting") { model.startMeeting() }.buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(!model.ready || model.isBusy || (model.meetingMode == .online && !model.screenGranted))
                     Button("Cancel", action: onCancel).buttonStyle(CirclesButtonStyle(compact: false))
                 }
-                if !model.statusDetail.isEmpty { Text(model.statusDetail).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
             }.padding(32).frame(maxWidth: 844, alignment: .leading)
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }

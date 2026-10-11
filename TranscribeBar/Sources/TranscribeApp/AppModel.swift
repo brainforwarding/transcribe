@@ -31,11 +31,10 @@ final class AppModel: ObservableObject {
             (@Sendable (PreviewWindow) -> Void)?) -> CaptureSession
         var transcribe: (SessionRecord, URL, OpenAIConfig) async throws -> FinalTranscription
         var uptime: () -> Double
-        var credentials: () throws -> OpenAIConfig
+        var credentials: (ConnectionProvider) throws -> OpenAIConfig
         var save: (SessionStore, SessionRecord) throws -> Void
         var cleanAudio: (SessionStore, SessionRecord) throws -> Void
-        var captureInsertion: () -> ((String) -> PasteService.Outcome)?
-        var pasteAtCurrentCaret: (String) -> PasteService.Outcome
+        var deliverAtCurrentCaret: (String, @escaping @MainActor () -> Bool) async -> PasteService.Outcome
         var copy: (String) -> Void
         var automaticTimer = true
 
@@ -53,16 +52,13 @@ final class AppModel: ObservableObject {
                     : record.meetingMode == .online ? .onlineMeeting : .inPersonMeeting
                 return try await transcribeFinal(tracks: record.tracks, kind: kind, chunkDir: directory,
                     languages: record.language.map { [$0] } ?? [], keywords: record.keywords, config: credentials)
-            }, uptime: { ProcessInfo.processInfo.systemUptime }, credentials: {
-                guard let token = Keychain.get(), !token.isEmpty else { throw AppFailure.missingToken }
-                return OpenAIConfig(baseURL: Config.apiBaseURL, authValue: "Bearer \(token)")
+            }, uptime: { ProcessInfo.processInfo.systemUptime }, credentials: { provider in
+                guard let token = Keychain.get(for: provider), !token.isEmpty else { throw AppFailure.missingToken }
+                return OpenAIConfig(baseURL: provider.baseURL, authValue: "Bearer \(token)")
             }, save: { try $0.save($1) }, cleanAudio: { try $0.cleanAudio(for: $1) },
-            captureInsertion: {
-                switch paste.captureDestinationResult() {
-                case .captured(let destination): return { paste.insert($0, at: destination) }
-                case .unavailable(let reason): return { _ in .ready(reason: reason) }
-                }
-            }, pasteAtCurrentCaret: { paste.pasteAtCurrentCaret($0) }, copy: { paste.copy($0) })
+            deliverAtCurrentCaret: { text, canDeliver in
+                await paste.deliverAtCurrentCaret(text, canDeliver: canDeliver)
+            }, copy: { paste.copy($0) })
         }
     }
     @Published var phase: Phase = .idle
@@ -79,6 +75,7 @@ final class AppModel: ObservableObject {
     @Published var systemHealth: CaptureHealth?
     @Published var sourceIssue = ""
     @Published var statusDetail = ""
+    @Published var deliveryDetail = ""
     @Published var chipState: ChipState = .hidden
     @Published var chipVisible = false
     @Published var shortcutAvailable = false
@@ -91,6 +88,7 @@ final class AppModel: ObservableObject {
     @Published var hasKey = false
     @Published var tokenAccessRequired = false
     @Published var keyStatus: KeyStatus = .idle
+    @Published private(set) var connectionProvider: ConnectionProvider
     @Published var consentAccepted: Bool
     @Published var meetingMode: MeetingMode = .online
     @Published var meetingTitle = ""
@@ -110,6 +108,10 @@ final class AppModel: ObservableObject {
     var retryShortcuts: (() -> Void)?
     private let preferences: UserDefaults
     private let operations: Operations
+    private let credentialAccess: CredentialAccess
+    private let verificationSession: URLSession
+    private var providerStatuses: [ConnectionProvider: KeyStatus] = [:]
+    private var verificationGeneration = UUID()
     private var store: SessionStore?
     private var controller: CaptureSession?
     private var timer: Timer?
@@ -121,7 +123,8 @@ final class AppModel: ObservableObject {
     private var pendingPreview: PreviewWindow?
     private var previewDisabled = false
     private var captureStatusSaveFailed = false
-    private var automaticInsertion: ((String) -> PasteService.Outcome)?
+    private var automaticDeliveryID: UUID?
+    private var manualPasteTask: Task<Void, Never>?
     private var cancelledIDs: Set<UUID> = []
     private var dismissTask: Task<Void, Never>?
     var selectedRecord: SessionRecord? { records.first { $0.id == selectedRecordID } }
@@ -131,7 +134,8 @@ final class AppModel: ObservableObject {
     var ready: Bool { micGranted && hasKey && consentAccepted && keyStatus != .checking && keyStatus != .rejected }
     var needsSetup: Bool { !ready }
     var micOnly: Bool { get { meetingMode == .inPerson } set { meetingMode = newValue ? .inPerson : .online } }
-    var keyFingerprint: String? { Keychain.cachedFingerprint }
+    var keyFingerprint: String? { credentialAccess.fingerprint(connectionProvider) }
+    var canChangeConnectionProvider: Bool { !isBusy && manualPasteTask == nil && keyStatus != .checking }
     var chipWidth: CGFloat {
         switch chipState {
         case .recording: return activeKind == .meeting ? 192 : 164
@@ -148,10 +152,23 @@ final class AppModel: ObservableObject {
         return records.filter { r in r.kind == kind && (searchText.isEmpty || [r.title,r.transcript,r.notes,r.summary].contains { $0.localizedCaseInsensitiveContains(searchText) }) }
     }
     init(store suppliedStore: SessionStore? = nil, operations suppliedOperations: Operations? = nil,
-         preferences: UserDefaults = .standard, initializeSystemState: Bool = true) {
+         preferences: UserDefaults = .standard, initializeSystemState: Bool = true,
+         credentialAccess suppliedCredentialAccess: CredentialAccess? = nil, verificationSession: URLSession = .shared) {
         self.preferences = preferences
         operations = suppliedOperations ?? .live()
+        let access = suppliedCredentialAccess ?? CredentialAccess.live
+        credentialAccess = access
+        self.verificationSession = verificationSession
         let p = preferences
+        let inspectCredentials = initializeSystemState || suppliedCredentialAccess != nil
+        if let selected = p.string(forKey: "connectionProvider").flatMap(ConnectionProvider.init(rawValue:)) {
+            connectionProvider = selected
+        } else {
+            let legacyUser = p.bool(forKey: "consentAccepted") || (inspectCredentials && access.legacyConfigured())
+            let resolved: ConnectionProvider = legacyUser ? .team : .openAI
+            connectionProvider = resolved
+            p.set(resolved.rawValue, forKey: "connectionProvider")
+        }
         consentAccepted = p.bool(forKey: "consentAccepted")
         pasteLastShortcutEnabled = p.object(forKey: "pasteLastShortcutEnabled") as? Bool ?? true
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -162,9 +179,9 @@ final class AppModel: ObservableObject {
         appearance = p.string(forKey: "appearance") ?? "system"
         dictionaryWords = p.stringArray(forKey: "dictionaryWords") ?? []
         selectedMicID = p.string(forKey: "selectedMicID")
-        if initializeSystemState {
-            hasKey = Keychain.get() != nil
-            tokenAccessRequired = Keychain.needsAccess
+        if inspectCredentials {
+            hasKey = credentialAccess.get(connectionProvider) != nil
+            tokenAccessRequired = credentialAccess.needsAccess(connectionProvider)
         }
         do {
             let s = try suppliedStore ?? SessionStore(); store = s; records = try s.load()
@@ -178,8 +195,8 @@ final class AppModel: ObservableObject {
     func refreshMics() { mics = MicCapture.available(); if let id = selectedMicID, !mics.contains(where: { $0.uniqueID == id }) { selectedMicID = nil } }
     func refreshPermissions() async {
         micGranted = Permissions.micAuthorized(); accessibilityGranted = Permissions.accessibilityAuthorized()
-        screenGranted = CGPreflightScreenCaptureAccess(); hasKey = Keychain.get() != nil
-        tokenAccessRequired = Keychain.needsAccess
+        screenGranted = CGPreflightScreenCaptureAccess(); hasKey = credentialAccess.get(connectionProvider) != nil
+        tokenAccessRequired = credentialAccess.needsAccess(connectionProvider)
     }
     func grantMic() { Task { _ = await Permissions.requestMic(); await refreshPermissions(); refreshMics() } }
     func grantScreen() { Permissions.requestScreen(); Task { await refreshPermissions() } }
@@ -228,34 +245,53 @@ final class AppModel: ObservableObject {
             } catch { self?.statusDetail = "Import unavailable" }
         }
     }
+    func setConnectionProvider(_ provider: ConnectionProvider) {
+        guard canChangeConnectionProvider, provider != connectionProvider else { return }
+        providerStatuses[connectionProvider] = keyStatus
+        verificationGeneration = UUID()
+        connectionProvider = provider
+        preferences.set(provider.rawValue, forKey: "connectionProvider")
+        hasKey = credentialAccess.get(provider) != nil
+        tokenAccessRequired = credentialAccess.needsAccess(provider)
+        keyStatus = providerStatuses[provider] ?? .idle
+        statusDetail = ""
+    }
     func saveKey(_ key: String) { Task { _ = await saveAndVerifyKey(key) } }
     func unlockToken() {
-        guard !isBusy else { return }
-        hasKey = Keychain.unlock() != nil
-        tokenAccessRequired = Keychain.needsAccess
+        guard canChangeConnectionProvider else { return }
+        hasKey = credentialAccess.unlock(connectionProvider) != nil
+        tokenAccessRequired = credentialAccess.needsAccess(connectionProvider)
         if hasKey {
             if keyStatus == .idle || keyStatus == .savedUnverified { keyStatus = .savedUnverified }
-            statusDetail = "Token unlocked"
+            statusDetail = ""
         } else {
             if keyStatus == .idle || keyStatus == .savedUnverified { keyStatus = .idle }
-            statusDetail = tokenAccessRequired ? "Token access required" : "Add your team token"
+            statusDetail = tokenAccessRequired ? "Credential access required" : "Add your " + connectionProvider.credentialLabel.lowercased()
         }
     }
     func saveAndVerifyKey(_ key: String) async -> Bool {
-        let value = key.trimmingCharacters(in: .whitespacesAndNewlines); guard !value.isEmpty else { return false }
-        do { try Keychain.set(value); hasKey = true; tokenAccessRequired = false }
-        catch { statusDetail = "Token could not be saved"; return false }
-        guard let base = Config.proxyBaseURL else { keyStatus = .verified; return true }
-        keyStatus = .checking
-        var req = URLRequest(url: base.appendingPathComponent("chat/completions")); req.httpMethod = "POST"; req.timeoutInterval = 10
-        req.setValue("Bearer \(value)", forHTTPHeaderField: "Authorization"); req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = #"{"model":"__verify__"}"#.data(using: .utf8)
+        guard canChangeConnectionProvider else { return false }
+        let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        let provider = connectionProvider, generation = UUID()
+        verificationGeneration = generation
+        do { try credentialAccess.set(value, provider); hasKey = true; tokenAccessRequired = false }
+        catch { statusDetail = "Credential could not be saved"; return false }
+        keyStatus = .checking; statusDetail = ""
+        let request = provider.verificationRequest(credential: value)
+        let status: KeyStatus
         do {
-            let (_, res) = try await URLSession.shared.data(for: req); let code = (res as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 401 { keyStatus = .rejected; return false }
-            keyStatus = code == 403 || (200..<300).contains(code) ? .verified : .savedUnverified
-        } catch { keyStatus = .savedUnverified }
-        return true
+            let (_, response) = try await verificationSession.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode
+            if provider == .openAI {
+                status = code == 200 ? .verified : code == 401 ? .rejected : .savedUnverified
+            } else {
+                status = code == 401 ? .rejected : code == 403 || code.map({ (200..<300).contains($0) }) == true ? .verified : .savedUnverified
+            }
+        } catch { status = .savedUnverified }
+        guard connectionProvider == provider, verificationGeneration == generation else { return false }
+        keyStatus = status; providerStatuses[provider] = status
+        return status != .rejected
     }
     func openMeetings() { sidebar = .meetings; selectedRecordID = nil; searchText = ""; meetingSetupPresented = true; showLibrary?() }
     func toggleRecord() { toggleDictation() }
@@ -263,16 +299,16 @@ final class AppModel: ObservableObject {
     func startDictation() { start(kind: .dictation) }
     func startMeeting() { start(kind: .meeting) }
     private func start(kind: SessionKind) {
-        guard !isBusy else { return }
+        guard !isBusy, manualPasteTask == nil else { return }
         guard ready, let store else { statusDetail = "Finish setup"; showSettings?(); return }
         guard kind != .meeting || meetingMode != .online || screenGranted else { statusDetail = "Allow Mac audio"; showSettings?(); return }
         let title = kind == .dictation ? "Dictation" : meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let r = SessionRecord(kind: kind, meetingMode: meetingMode, title: title.isEmpty ? "Meeting" : title, language: languages.first { $0.id == languageID }?.code, keywords: dictionaryWords)
         do { try operations.save(store, r) } catch { statusDetail = "Recording could not be saved"; phase = .error; return }
         records.insert(r, at: 0); activeSessionID = r.id; activeKind = kind; phase = .starting
-        automaticInsertion = kind == .dictation ? operations.captureInsertion() : nil
+        automaticDeliveryID = kind == .dictation ? r.id : nil
         elapsed = 0; startedUptime = operations.uptime(); micLevel = 0; systemLevel = 0
-        sourceIssue = ""; statusDetail = ""; micHealth = nil; systemHealth = nil; previewDisabled = false; captureStatusSaveFailed = false; setChip(.recording)
+        sourceIssue = ""; statusDetail = ""; deliveryDetail = ""; micHealth = nil; systemHealth = nil; previewDisabled = false; captureStatusSaveFailed = false; setChip(.recording)
         if kind == .meeting { sidebar = .meetings; selectedRecordID = r.id; meetingSetupPresented = false; showLibrary?() }
         let level: @Sendable (Source, Double) -> Void = { [weak self] source, level in Task { @MainActor in
             guard let self, self.activeSessionID == r.id else { return }
@@ -292,7 +328,7 @@ final class AppModel: ObservableObject {
                 try await ctl.start(); guard let self, self.activeSessionID == r.id, self.phase == .starting else { return }
                 self.phase = .recording
                 guard self.mutate(r.id, { $0.status = .recording }) else {
-                    self.captureStatusSaveFailed = true; self.automaticInsertion = nil
+                    self.captureStatusSaveFailed = true; self.automaticDeliveryID = nil
                     self.finishRecording(); return
                 }
                 self.startTimer(id: r.id)
@@ -357,11 +393,11 @@ final class AppModel: ObservableObject {
     func cancelDictation() {
         guard activeKind == .dictation, let id = activeSessionID, isBusy else { if activeKind == .meeting { chipVisible = false }; return }
         cancelledIDs.insert(id)
-        _ = mutate(id) { $0.delivery = .cancelled; $0.status = .cancelled }; automaticInsertion = nil; setChip(.cancelled)
+        _ = mutate(id) { $0.delivery = .cancelled; $0.status = .cancelled }; automaticDeliveryID = nil; setChip(.cancelled)
         if phase == .starting || phase == .recording { finishRecording() }
     }
     private enum AppFailure: Error { case missingToken }
-    private func config() throws -> OpenAIConfig { try operations.credentials() }
+    private func config() throws -> OpenAIConfig { try operations.credentials(connectionProvider) }
     private func process(id: UUID) {
         guard let r = records.first(where: { $0.id == id }), let store else { return }
         guard mutate(id, { $0.status = .processing }) else { phase = .error; setChip(.failed); return }
@@ -385,24 +421,34 @@ final class AppModel: ObservableObject {
                 if current.kind == .dictation {
                     if current.delivery == .cancelled { self.setChip(.cancelled, dismissAfter: 12) }
                     else if !current.hasText { self.setChip(result.complete ? .silent : .failed, dismissAfter: 8) }
-                    else if current.status == .complete, r.delivery == .eligible, let insertion = self.automaticInsertion {
-                        switch insertion(current.transcript) {
-                        case .inserted: _ = self.mutate(id) { $0.delivery = .inserted }; self.setChip(.inserted, dismissAfter: 2)
-                        case .ready(let reason), .unconfirmed(let reason):
-                            self.noteDeliveryIssue(reason, for: id)
-                            self.setChip(.ready, dismissAfter: 12)
+                    else if self.canAutomaticallyDeliver(id: id, text: current.transcript) {
+                        // Native delivery resolves focus now, after final text is durable.
+                        // Its final guard runs immediately before clipboard/event writes.
+                        let outcome = await self.operations.deliverAtCurrentCaret(current.transcript, { [weak self] in
+                            self?.canAutomaticallyDeliver(id: id, text: current.transcript) == true
+                        })
+                        guard self.activeSessionID == id else { return }
+                        if self.cancelledIDs.contains(id) || self.activeRecord?.delivery == .cancelled {
+                            self.setChip(.cancelled, dismissAfter: 12)
+                        } else {
+                            switch outcome {
+                            case .inserted: _ = self.mutate(id) { $0.delivery = .inserted }; self.setChip(.inserted, dismissAfter: 2)
+                            case .ready(let reason), .unconfirmed(let reason):
+                                self.noteDeliveryIssue(reason, for: id)
+                                self.setChip(.ready, dismissAfter: 12)
+                            }
                         }
                     } else { self.setChip(.ready, dismissAfter: 12) }
                 } else {
                     self.export(id); self.chipVisible = false
                     if self.includeSummary && current.hasText { await self.generateNotes(for: id, credentials: credentials) }
                 }
-                self.automaticInsertion = nil
+                self.automaticDeliveryID = nil
                 if !self.keepAudio, !self.cancelledIDs.contains(id), let final = self.records.first(where: { $0.id == id }) { do { try self.operations.cleanAudio(store, final) } catch { self.statusDetail = "Transcript saved; audio retained" } }
                 self.phase = .done
             } catch {
                 _ = self.mutate(id) { $0.status = $0.delivery == .cancelled ? .cancelled : .failed; $0.issues.append("Transcription unavailable"); if $0.delivery == .eligible { $0.delivery = .ready } }
-                self.phase = .error; self.statusDetail = self.hasKey ? "Transcription unavailable" : "Add your team token"
+                self.phase = .error; self.statusDetail = self.hasKey ? "Transcription unavailable" : "Add your " + self.connectionProvider.credentialLabel.lowercased()
                 self.setChip(self.activeRecord?.delivery == .cancelled ? .cancelled : .failed, dismissAfter: 12)
             }
         }
@@ -425,15 +471,15 @@ final class AppModel: ObservableObject {
         }
     }
     func retry(_ id: UUID) {
-        guard !isBusy, let r = records.first(where: { $0.id == id }) else { return }
+        guard !isBusy, manualPasteTask == nil, let r = records.first(where: { $0.id == id }) else { return }
         cancelledIDs.remove(id)
-        automaticInsertion = nil; activeSessionID = id; activeKind = r.kind
+        automaticDeliveryID = nil; activeSessionID = id; activeKind = r.kind
         if r.hasText && r.status == .cancelled && r.issues.isEmpty { _ = mutate(id) { $0.status = .complete; $0.delivery = .ready }; phase = .done; setChip(.ready, dismissAfter: 12); return }
         guard r.canRecover, mutate(id, { $0.delivery = $0.kind == .dictation ? .ready : .never }) else { return }; process(id: id)
     }
     func recover(_ id: UUID) { retry(id) }
     func recoverCancelled() { if let id = activeSessionID { retry(id) } }
-    func regenerateNotes(_ id: UUID) { guard let r = records.first(where: { $0.id == id }), r.kind == .meeting, r.hasText else { return }; Task { do { await generateNotes(for: id, credentials: try config()) } catch { statusDetail = "Add your team token" } } }
+    func regenerateNotes(_ id: UUID) { guard let r = records.first(where: { $0.id == id }), r.kind == .meeting, r.hasText else { return }; Task { do { await generateNotes(for: id, credentials: try config()) } catch { statusDetail = "Add your " + self.connectionProvider.credentialLabel.lowercased() } } }
     private func generateNotes(for id: UUID, credentials: OpenAIConfig) async {
         guard let r = records.first(where: { $0.id == id }), r.summaryStatus != .processing, mutate(id, { $0.summaryStatus = .processing }) else { return }
         do {
@@ -460,23 +506,39 @@ final class AppModel: ObservableObject {
     }
     func removeDictionaryWord(_ word: String) { dictionaryWords.removeAll { $0 == word } }
     func copyTranscript(_ id: UUID) { if let r = records.first(where: { $0.id == id }), r.hasText { operations.copy(r.transcript) } }
+    private func canAutomaticallyDeliver(id: UUID, text: String) -> Bool {
+        guard !Task.isCancelled, phase == .transcribing, activeSessionID == id,
+              activeKind == .dictation, automaticDeliveryID == id,
+              !cancelledIDs.contains(id), let record = records.first(where: { $0.id == id }) else { return false }
+        return record.status == .complete && record.delivery == .ready && record.transcript == text && record.hasText
+    }
     func pasteLast() {
-        guard !isBusy, let r = lastRecordWithText else { return }
-        switch operations.pasteAtCurrentCaret(r.transcript) {
-        case .inserted: statusDetail = ""; setChip(.inserted, dismissAfter: 2)
-        case .ready(let reason):
-            noteDeliveryIssue(reason, for: r.id)
-            operations.copy(r.transcript); setChip(.ready, dismissAfter: 8)
-        case .unconfirmed(let reason):
-            // A write may already have succeeded. Do not prepare a duplicate paste.
-            noteDeliveryIssue(reason, for: r.id)
-            setChip(.ready, dismissAfter: 12)
+        guard !isBusy, manualPasteTask == nil, let r = lastRecordWithText else { return }
+        manualPasteTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.manualPasteTask = nil }
+            let outcome = await self.operations.deliverAtCurrentCaret(r.transcript, { [weak self] in
+                guard let self, !Task.isCancelled, !self.isBusy else { return false }
+                return self.lastRecordWithText?.id == r.id && self.lastRecordWithText?.transcript == r.transcript
+            })
+            // A new recording owns the chip; a late manual result must not replace it.
+            guard !Task.isCancelled, !self.isBusy, self.lastRecordWithText?.id == r.id else { return }
+            switch outcome {
+            case .inserted: self.deliveryDetail = ""; self.setChip(.inserted, dismissAfter: 2)
+            case .ready(let reason):
+                self.noteDeliveryIssue(reason, for: r.id)
+                self.setChip(.ready, dismissAfter: 8)
+            case .unconfirmed(let reason):
+                // A dispatched paste may still complete. Never copy or retry it automatically.
+                self.noteDeliveryIssue(reason, for: r.id)
+                self.setChip(.ready, dismissAfter: 12)
+            }
         }
     }
     private func noteDeliveryIssue(_ reason: String, for id: UUID) {
         let detail = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !detail.isEmpty else { return }
-        statusDetail = detail
+        deliveryDetail = detail
         guard let record = records.first(where: { $0.id == id }),
               record.status != .cancelled, record.delivery != .cancelled,
               !record.issues.contains(detail) else { return }
@@ -511,5 +573,6 @@ final class AppModel: ObservableObject {
         if activeKind == .dictation, isBusy { cancelDictation() }
         if phase == .starting || phase == .recording { finishRecording() }
         await stopTask?.value; previewTask?.cancel(); processingTask?.cancel()
+        manualPasteTask?.cancel(); await manualPasteTask?.value
     }
 }

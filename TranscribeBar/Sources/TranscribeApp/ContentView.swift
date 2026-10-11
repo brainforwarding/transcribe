@@ -27,8 +27,31 @@ struct ContentView: View {
         .preferredColorScheme(model.colorScheme)
         .font(DesignSystem.font()).foregroundStyle(DesignSystem.primary).background(DesignSystem.surface)
         .frame(minWidth: 880, idealWidth: 1120, maxWidth: .infinity, minHeight: 560, idealHeight: 680, maxHeight: .infinity)
+        .overlay(alignment: .bottomTrailing) {
+            if let message = generalNotice {
+                HStack(alignment: .top, spacing: 12) {
+                    Text(message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button { model.statusDetail = "" } label: {
+                        DesignIcon(name: "chip-imgIconClose", size: 12, color: DesignSystem.muted)
+                            .frame(width: 24, height: 24).background(DesignSystem.subtle, in: Circle())
+                    }.buttonStyle(.plain).help("Dismiss").accessibilityLabel("Dismiss notice")
+                }
+                .padding(12).frame(maxWidth: 360, alignment: .leading)
+                .background(DesignSystem.raised, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(DesignSystem.border, lineWidth: 1))
+                .shadow(color: DesignSystem.shadow, radius: 6, y: 4).padding(16)
+            }
+        }
         .onAppear { Task { await model.refreshPermissions(); model.refreshMics() } }
         .onChange(of: model.activeSessionID) { id in if id != nil { model.meetingSetupPresented = false } }
+    }
+    private var generalNotice: String? {
+        let message = model.statusDetail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, !model.records.contains(where: { record in
+            record.issues.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == message }
+        }) else { return nil }
+        return message
     }
     private func switchSidebar(_ sidebar: AppModel.Sidebar) {
         model.sidebar = sidebar; model.selectedRecordID = nil; model.searchText = ""; model.meetingSetupPresented = false

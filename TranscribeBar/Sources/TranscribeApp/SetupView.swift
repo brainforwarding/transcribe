@@ -8,8 +8,12 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 24) {
                 Text("Set up Transcribe").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
                 Text("Dictation and meeting notes, ready on your Mac.").foregroundStyle(DesignSystem.muted)
+                HStack(spacing: 16) {
+                    Text("Connection").font(DesignSystem.font(15, weight: .semibold))
+                    ConnectionProviderPicker().frame(width: 190)
+                }
                 if !model.hasKey || model.keyStatus == .checking || model.keyStatus == .rejected || model.keyStatus == .savedUnverified {
-                    Text(Config.proxyBaseURL == nil ? "Connect OpenAI" : "Connect your team").font(DesignSystem.font(18, weight: .bold))
+                    Text(model.connectionProvider.setupTitle).font(DesignSystem.font(18, weight: .bold))
                     KeyField()
                 }
                 setupRow("Microphone", icon: "onboarding-imgIconMicrophone", detail: "Capture your voice.", allowed: model.micGranted, action: model.grantMic)
@@ -23,7 +27,6 @@ struct SetupView: View {
                     Text("You can record and copy manually while you enable pasting.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
                     Button("Try a dictation") { model.startDictation() }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(!model.ready || model.isBusy)
                 }
-                if !model.statusDetail.isEmpty { Text(model.statusDetail).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
             }.padding(32).frame(maxWidth: 740, alignment: .leading)
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }

@@ -61,32 +61,31 @@ struct TranscribeInsertionDiagnostics {
         diagnostics["fixtureContentGuardPassed"] = hasEmptyValue && hasEmptyCaret
         guard hasEmptyValue && hasEmptyCaret else { emit(diagnostics); return }
         let service = PasteService()
+        service.diagnosticTarget = (app.processIdentifier, element)
         let sentinel = "Transcribe controlled insertion fixture."
-        switch service.captureDestinationResult() {
-        case .unavailable(let reason):
-            diagnostics["captureOutcome"] = "unavailable"
-            diagnostics["captureReason"] = reason
-        case .captured(let destination):
-            diagnostics["captureOutcome"] = "captured"
-            guard service.diagnosticMatches(destination, processID: app.processIdentifier, element: element) else {
-                diagnostics["destinationGuardPassed"] = false
-                emit(diagnostics)
-                return
-            }
-            diagnostics["destinationGuardPassed"] = true
-            switch service.insert(sentinel, at: destination) {
+        let result = await service.deliverAtCurrentCaret(sentinel, canDeliver: {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }
+            var value: CFTypeRef?
+            var selected: CFTypeRef?
+            var range = CFRange()
+            guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+                  value as? String == "",
+                  AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selected) == .success,
+                  let selected, CFGetTypeID(selected) == AXValueGetTypeID() else { return false }
+            let selection = selected as! AXValue
+            return AXValueGetType(selection) == .cfRange && AXValueGetValue(selection, .cfRange, &range)
+                && range.location == 0 && range.length == 0
+        })
+        switch result {
             case .inserted: diagnostics["insertOutcome"] = "inserted"
             case .ready(let reason): diagnostics["insertOutcome"] = "ready"; diagnostics["insertReason"] = reason
             case .unconfirmed(let reason): diagnostics["insertOutcome"] = "unconfirmed"; diagnostics["insertReason"] = reason
-            }
-            diagnostics["writeStatus"] = service.diagnosticWriteStatus?.rawValue
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            var value: CFTypeRef?
-            let status = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
-            diagnostics["delayedValueStatus"] = status.rawValue
-            diagnostics["delayedExactSentinel"] = value as? String == sentinel
-            diagnostics["delayedCharacterCount"] = (value as? String).map { ($0 as NSString).length } ?? -1
         }
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
+        diagnostics["delayedValueStatus"] = status.rawValue
+        diagnostics["delayedExactSentinel"] = value as? String == sentinel
+        diagnostics["delayedCharacterCount"] = (value as? String).map { ($0 as NSString).length } ?? -1
         emit(diagnostics)
     }
 

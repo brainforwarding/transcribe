@@ -7,5 +7,7 @@ trap 'rm -rf "$STAGE"' EXIT
 swiftc -target arm64-apple-macosx13.0 \
     "$ROOT/Sources/TranscribeApp/ShortcutService.swift" \
     "$ROOT/Sources/TranscribeApp/Keychain.swift" \
+    "$ROOT/Sources/TranscribeApp/Config.swift" \
+    "$ROOT/Sources/TranscribeApp/PasteService.swift" \
     "$ROOT/scripts/test-native.swift" -o "$STAGE/native-selftest"
 "$STAGE/native-selftest"

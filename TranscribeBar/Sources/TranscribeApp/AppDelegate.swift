@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let chip = FloatingChipController()
     private var statusItem: NSStatusItem!
     private var libraryWindow: NSWindow?
-    private var settingsWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var showingChip = false
     private var shownWidth: CGFloat = 0
@@ -23,14 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
-        add("Start dictation    ⌥ ⌥", #selector(toggleDictation), to: menu, tag: 1)
-        add("Start meeting…", #selector(openMeetings), to: menu)
-        add("Paste last transcript    ⌥ ⇧ V", #selector(pasteLast), to: menu, tag: 3)
+        add("Start dictation    ⌥ ⌥", #selector(toggleDictation), symbol: "mic", to: menu, tag: 1)
+        add("Start meeting…", #selector(openMeetings), symbol: "video", to: menu)
+        add("Paste last transcript    ⌥ ⇧ V", #selector(pasteLast), symbol: "doc.on.clipboard", to: menu, tag: 3)
         menu.addItem(.separator())
-        add("Open Transcribe", #selector(openLibrary), to: menu)
-        add("Settings…", #selector(openSettings), to: menu)
+        add("Open Transcribe", #selector(openLibrary), symbol: "waveform", to: menu)
+        add("Settings…", #selector(openSettings), symbol: "gearshape", to: menu)
         menu.addItem(.separator())
-        add("Quit Transcribe", #selector(quit), to: menu)
+        add("Quit Transcribe", #selector(quit), symbol: "power", to: menu)
         statusItem.menu = menu
 
         model.showLibrary = { [weak self] in self?.openLibrary() }
@@ -98,9 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if model.activeKind == .dictation, model.isBusy {
             let canFinish = model.phase == .recording || model.phase == .starting
             dictation.title = canFinish ? "Finish dictation    ⌥" : "Transcribing…"
+            dictation.image = menuImage(canFinish ? "stop.fill" : "ellipsis.circle")
             dictation.isEnabled = canFinish
         } else {
             dictation.title = "Start dictation    ⌥ ⌥"
+            dictation.image = menuImage("mic")
             dictation.isEnabled = !model.isBusy
         }
     }
@@ -133,10 +134,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem?.button?.title = image == nil ? "Transcribe" : ""
     }
 
-    private func add(_ title: String, _ action: Selector, to menu: NSMenu, tag: Int = 0) {
+    private func menuImage(_ symbol: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        image?.size = NSSize(width: 16, height: 16)
+        image?.isTemplate = true
+        return image
+    }
+
+    private func add(_ title: String, _ action: Selector, symbol: String, to menu: NSMenu, tag: Int = 0) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.tag = tag
+        item.indentationLevel = 0
+        item.image = menuImage(symbol)
         menu.addItem(item)
     }
 
@@ -162,17 +172,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openSettings() {
-        if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 650),
-                styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            window.title = "Transcribe Settings"
-            window.minSize = NSSize(width: 520, height: 520)
-            window.isReleasedWhenClosed = false
-            window.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(model))
-            window.center()
-            settingsWindow = window
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        model.sidebar = .settings
+        model.selectedRecordID = nil
+        model.searchText = ""
+        model.meetingSetupPresented = false
+        openLibrary()
     }
 }

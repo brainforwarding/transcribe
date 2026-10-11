@@ -11,7 +11,6 @@ struct SettingsView: View {
                 Text("Settings").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
                 preference("Start / finish") { StatusPill(title: "⌥ ⌥ / ⌥"); Text("Double to start · Single to finish").foregroundStyle(DesignSystem.muted) }
                 preference("Paste last") { StatusPill(title: "⌥ ⇧ V"); Toggle("Enable shortcut", isOn: $model.pasteLastShortcutEnabled).toggleStyle(.switch) }
-                preference("Transcription quality") { Text("Highest accuracy").font(DesignSystem.font(15, weight: .semibold)) }
                 preference("Language") {
                     Picker("Language", selection: $model.languageID) { ForEach(model.languages) { Text($0.id == "auto" ? "Automatic" : $0.name).tag($0.id) } }.labelsHidden().frame(width: 190)
                 }
@@ -19,12 +18,13 @@ struct SettingsView: View {
                     Picker("Appearance", selection: $model.appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }.labelsHidden().frame(width: 190)
                 }
                 Divider().overlay(DesignSystem.border)
-                preference(Config.proxyBaseURL == nil ? "OpenAI key" : "Team token") {
+                preference("Connection") { ConnectionProviderPicker().frame(width: 190) }
+                preference(model.connectionProvider.credentialLabel) {
                     KeyStatusLabel(); Spacer(minLength: 8)
                     if model.tokenAccessRequired {
-                        Button("Unlock") { model.unlockToken() }.buttonStyle(CirclesButtonStyle()).disabled(model.isBusy)
+                        Button("Unlock") { model.unlockToken() }.buttonStyle(CirclesButtonStyle()).disabled(!model.canChangeConnectionProvider)
                     }
-                    Button(replacingKey ? "Cancel" : model.hasKey ? "Replace" : "Add") { replacingKey.toggle(); model.keyStatus = .idle }.buttonStyle(CirclesButtonStyle())
+                    Button(replacingKey ? "Cancel" : model.hasKey ? "Replace" : "Add") { replacingKey.toggle() }.buttonStyle(CirclesButtonStyle()).disabled(!model.canChangeConnectionProvider)
                 }
                 if replacingKey { KeyField(onSaved: { replacingKey = false }) }
                 preference("Microphone") { MicrophonePicker().frame(maxWidth: 270) }
@@ -50,7 +50,6 @@ struct SettingsView: View {
                 Toggle("Keep audio", isOn: $model.keepAudio).toggleStyle(.switch)
                 Toggle("Generate meeting summaries", isOn: $model.includeSummary).toggleStyle(.switch)
                 Button("Import recordings…") { model.importLegacyRecordings() }.buttonStyle(CirclesButtonStyle())
-                if !model.statusDetail.isEmpty { Text(model.statusDetail).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
                 HStack {
                     Text("Transcribe \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")").font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted)
                     Spacer()
@@ -61,6 +60,7 @@ struct SettingsView: View {
             .font(DesignSystem.font()).foregroundStyle(DesignSystem.primary).background(DesignSystem.surface)
             .preferredColorScheme(model.colorScheme)
             .onAppear { Task { await model.refreshPermissions() }; model.refreshMics() }
+            .onChange(of: model.connectionProvider) { _ in replacingKey = false }
     }
     private func preference<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
         HStack(alignment: .top, spacing: 24) { Text(title).font(DesignSystem.font(15, weight: .semibold)).frame(width: 208, alignment: .leading); content(); Spacer(minLength: 0) }.frame(minHeight: 36)
@@ -79,7 +79,7 @@ struct KeyStatusLabel: View {
         switch model.keyStatus {
         case .checking: return "Checking…"
         case .verified: return "Connected"
-        case .rejected: return "Token not accepted"
+        case .rejected: return model.connectionProvider == .openAI ? "Key not accepted" : "Token not accepted"
         case .savedUnverified: return "Saved · check connection"
         case .idle: return model.tokenAccessRequired ? "Unlock Keychain" : model.hasKey ? "Saved in Keychain" : "Not connected"
         }
@@ -93,24 +93,41 @@ struct KeyField: View {
     @State private var saving = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SecureField(Config.proxyBaseURL == nil ? "OpenAI API key" : "Personal team token", text: $value).textFieldStyle(.plain).padding(.horizontal, 16).frame(height: 44)
+            SecureField(model.connectionProvider.credentialPlaceholder, text: $value).textFieldStyle(.plain).padding(.horizontal, 16).frame(height: 44)
                 .background(DesignSystem.surface, in: Capsule()).overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1))
                 .onSubmit { save() }
             HStack {
                 Text("Stored securely in your Mac’s Keychain.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
                 Spacer()
                 if model.tokenAccessRequired {
-                    Button("Unlock token") { model.unlockToken() }.buttonStyle(CirclesButtonStyle()).disabled(saving || model.isBusy)
+                    Button("Unlock") { model.unlockToken() }.buttonStyle(CirclesButtonStyle()).disabled(saving || !model.canChangeConnectionProvider)
                 }
-                Button(saving ? "Checking…" : "Connect") { save() }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(saving || value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button(saving ? "Checking…" : "Connect") { save() }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(saving || !model.canChangeConnectionProvider || value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             if model.keyStatus == .rejected || model.keyStatus == .savedUnverified { KeyStatusLabel() }
         }
+        .onChange(of: model.connectionProvider) { _ in value = "" }
     }
     private func save() {
-        guard !saving, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !saving, model.canChangeConnectionProvider, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let submittedValue = value
+        let submittedProvider = model.connectionProvider
         saving = true
-        Task { let result = await model.saveAndVerifyKey(value); saving = false; if result { value = ""; onSaved() } }
+        Task {
+            guard model.connectionProvider == submittedProvider else { saving = false; return }
+            let result = await model.saveAndVerifyKey(submittedValue)
+            saving = false
+            if result { value = ""; onSaved() }
+        }
+    }
+}
+
+struct ConnectionProviderPicker: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        Picker("Connection", selection: Binding(get: { model.connectionProvider }, set: { model.setConnectionProvider($0) })) {
+            ForEach(ConnectionProvider.allCases) { provider in Text(provider.title).tag(provider) }
+        }.labelsHidden().disabled(!model.canChangeConnectionProvider)
     }
 }
 

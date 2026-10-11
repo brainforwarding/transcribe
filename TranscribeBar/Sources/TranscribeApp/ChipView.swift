@@ -39,12 +39,12 @@ struct ChipView: View {
                 iconButton("chip-imgIconCopy", "Copy last") { copyLast() }
             case .ready:
                 DesignIcon(name: "chip-imgIconCopy1", size: 14, color: DesignSystem.action)
-                if model.statusDetail.isEmpty {
+                if model.deliveryDetail.isEmpty {
                     Text("Ready")
                 } else {
                     Text("Ready")
-                        .help(model.statusDetail)
-                        .accessibilityHint(Text(model.statusDetail))
+                        .help(model.deliveryDetail)
+                        .accessibilityHint(Text(model.deliveryDetail))
                 }
                 Spacer(minLength: 0)
                 linkButton("Copy") { copyLast() }
