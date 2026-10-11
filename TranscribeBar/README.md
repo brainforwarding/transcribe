@@ -29,7 +29,7 @@ Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac
 - Double-tap Option to start. Tap Option once to finish. A small chip shows input and elapsed time.
 - At 4:30 the chip shows the 30-second warning. Recording stops at five minutes.
 - When transcription finishes, the app pastes into the currently focused editable field using Command–V. Keep the intended field focused until it finishes. Secure fields and terminals are excluded.
-- Your previous clipboard is restored after insertion is confirmed, unless you changed it in the meantime. If confirmation is unavailable, the transcript stays on the clipboard and in history; check the field before pasting again.
+- Your previous clipboard is restored after insertion is confirmed, unless you changed it in the meantime. An unconfirmed paste keeps the transcript on the clipboard unless you copy something else. History always retains the text; check the field before pasting again.
 - Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.
 - Option–Shift–V pastes the last dictation at the current editable cursor. Disable this shortcut in Settings if needed. The menu and history also provide copy actions.
 

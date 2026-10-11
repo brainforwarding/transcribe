@@ -64,10 +64,6 @@ struct ContentView: View {
             nav("Dictionary", "history-imgIconBook", selected: model.sidebar == .dictionary) { switchSidebar(.dictionary) }
             nav("Settings", "history-imgIconSetting2", selected: model.sidebar == .settings) { switchSidebar(.settings) }
             Spacer()
-            HStack(spacing: 8) {
-                DesignIcon(name: "history-imgIconTickCircle", size: 14, color: DesignSystem.muted)
-                Text(model.hasKey ? "Connected" : "Set up account").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-            }
         }.padding(16).frame(width: 180).frame(maxHeight: .infinity).background(DesignSystem.subtle)
     }
     private func nav(_ title: String, _ icon: String, selected: Bool, action: @escaping () -> Void) -> some View {

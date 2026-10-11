@@ -12,13 +12,13 @@ struct SettingsView: View {
                 preference("Start / finish") { StatusPill(title: "⌥ ⌥ / ⌥"); Text("Double to start · Single to finish").foregroundStyle(DesignSystem.muted) }
                 preference("Paste last") { StatusPill(title: "⌥ ⇧ V"); Toggle("Enable shortcut", isOn: $model.pasteLastShortcutEnabled).toggleStyle(.switch) }
                 preference("Language") {
-                    Picker("Language", selection: $model.languageID) { ForEach(model.languages) { Text($0.id == "auto" ? "Automatic" : $0.name).tag($0.id) } }.labelsHidden().frame(width: 190)
+                    Picker("Language", selection: $model.languageID) { ForEach(model.languages) { Text($0.id == "auto" ? "Automatic" : $0.name).tag($0.id) } }.labelsHidden().fixedSize(horizontal: true, vertical: false).frame(width: 190, alignment: .leading)
                 }
                 preference("Appearance") {
-                    Picker("Appearance", selection: $model.appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }.labelsHidden().frame(width: 190)
+                    Picker("Appearance", selection: $model.appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }.labelsHidden().fixedSize(horizontal: true, vertical: false).frame(width: 190, alignment: .leading)
                 }
                 Divider().overlay(DesignSystem.border)
-                preference("Connection") { ConnectionProviderPicker().frame(width: 190) }
+                preference("Connection") { ConnectionProviderPicker().fixedSize(horizontal: true, vertical: false).frame(width: 190, alignment: .leading) }
                 preference(model.connectionProvider.credentialLabel) {
                     KeyStatusLabel(); Spacer(minLength: 8)
                     if model.tokenAccessRequired {
@@ -27,7 +27,12 @@ struct SettingsView: View {
                     Button(replacingKey ? "Cancel" : model.hasKey ? "Replace" : "Add") { replacingKey.toggle() }.buttonStyle(CirclesButtonStyle()).disabled(!model.canChangeConnectionProvider)
                 }
                 if replacingKey { KeyField(onSaved: { replacingKey = false }) }
-                preference("Microphone") { MicrophonePicker().frame(maxWidth: 270) }
+                preference("Microphone") {
+                    HStack(spacing: 0) {
+                        MicrophonePicker().lineLimit(1).truncationMode(.tail)
+                        Spacer(minLength: 0)
+                    }.frame(width: 270, alignment: .leading)
+                }
                 preference("Permissions") {
                     VStack(alignment: .leading, spacing: 8) {
                         permission("Microphone", allowed: model.micGranted, action: model.grantMic)
@@ -63,7 +68,10 @@ struct SettingsView: View {
             .onChange(of: model.connectionProvider) { _ in replacingKey = false }
     }
     private func preference<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
-        HStack(alignment: .top, spacing: 24) { Text(title).font(DesignSystem.font(15, weight: .semibold)).frame(width: 208, alignment: .leading); content(); Spacer(minLength: 0) }.frame(minHeight: 36)
+        HStack(alignment: .top, spacing: 24) {
+            Text(title).font(DesignSystem.font(15, weight: .semibold)).frame(width: 208, alignment: .leading)
+            HStack(alignment: .top, spacing: 8) { content() }.frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(minHeight: 36)
     }
     private func permission(_ title: String, allowed: Bool, action: @escaping () -> Void) -> some View {
         HStack { Text(title).frame(width: 148, alignment: .leading); if allowed { Text("Allowed").foregroundStyle(DesignSystem.success) } else { Button("Allow", action: action).buttonStyle(.plain).foregroundStyle(DesignSystem.link) } }.font(DesignSystem.font(13))
