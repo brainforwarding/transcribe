@@ -28,12 +28,14 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
     public var onLevel: (@Sendable (Double) -> Void)?
     public var onHealth: (@Sendable (CaptureHealth) -> Void)?
     public var onPart: (@Sendable (AudioSpan) -> Void)?
+    public var onAudioFrame: (@Sendable (CapturedAudioFrame) -> Void)?
     public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))) {
         recorder = PCMTrackWriter(directory: outputURL.deletingLastPathComponent(), source: .system, epoch: epoch)
         super.init()
         recorder.onLevel = { [weak self] in self?.onLevel?($0) }
         recorder.onHealth = { [weak self] in self?.onHealth?($0) }
         recorder.onPart = { [weak self] in self?.onPart?($0) }
+        recorder.onAudioFrame = { [weak self] in self?.onAudioFrame?($0) }
     }
     deinit { watchdog?.cancel() }
     private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }

@@ -41,6 +41,11 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var imported: Bool
     public var language: String?
     public var keywords: [String]
+    public var liveMeetingVersion: Int?
+    public var meetingTurns: [MeetingTurn]
+    public var transcriptRevision: Int
+    public var summaryTranscriptRevision: Int?
+    public var summaryIsStale: Bool { liveMeetingVersion != nil && !summary.isEmpty && summaryTranscriptRevision != transcriptRevision }
 
     public init(id: UUID = UUID(), kind: SessionKind, meetingMode: MeetingMode = .online,
                 title: String, startedAt: Date = Date(), language: String? = nil,
@@ -53,10 +58,14 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         summary = ""; summaryStatus = .none; summaryEvidenceIDs = []; summaryEvidence = []; summaryNotesSnapshot = ""
         issues = []; transcriptionIssues = []; tracks = []; captureIncomplete = false
         exportURL = nil; importURL = nil; imported = false
+        liveMeetingVersion = nil; meetingTurns = []; transcriptRevision = 0; summaryTranscriptRevision = nil
     }
 
     public var canRecover: Bool {
         let hasAudio = tracks.contains { !$0.spans.isEmpty }
+        if liveMeetingVersion != nil {
+            return hasAudio && (!uncoveredMeetingAudio(tracks: tracks, turns: meetingTurns, includePending: false).isEmpty)
+        }
         if status == .partial { return hasAudio && transcriptionIssues.contains { $0.retryable || $0.failureKind?.allowsRecoveryAfterRemedy == true } }
         return hasAudio && (status == .failed || status == .cancelled)
     }
@@ -66,7 +75,8 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, meetingMode, title, startedAt, duration, status, delivery, notes, preview, transcript, rawTranscript, formattingFailure, serviceProviderID,
              segments, summary, summaryStatus, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
-             issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords
+             issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords,
+             liveMeetingVersion, meetingTurns, transcriptRevision, summaryTranscriptRevision
     }
     public init(from decoder: Decoder) throws {
         let v = try decoder.container(keyedBy: CodingKeys.self)
@@ -76,6 +86,10 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
                   startedAt: try v.decode(Date.self, forKey: .startedAt),
                   language: try v.decodeIfPresent(String.self, forKey: .language),
                   keywords: try v.decodeIfPresent([String].self, forKey: .keywords) ?? [])
+        liveMeetingVersion = try v.decodeIfPresent(Int.self, forKey: .liveMeetingVersion)
+        meetingTurns = try v.decodeIfPresent([MeetingTurn].self, forKey: .meetingTurns) ?? []
+        transcriptRevision = try v.decodeIfPresent(Int.self, forKey: .transcriptRevision) ?? 0
+        summaryTranscriptRevision = try v.decodeIfPresent(Int.self, forKey: .summaryTranscriptRevision)
         duration = try v.decodeIfPresent(Double.self, forKey: .duration) ?? 0
         status = try v.decodeIfPresent(SessionStatus.self, forKey: .status) ?? .failed
         delivery = try v.decodeIfPresent(DeliveryState.self, forKey: .delivery) ?? .ready

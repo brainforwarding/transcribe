@@ -110,6 +110,7 @@ private final class Fixture {
     var copies = 0
     var copyResult = true
     var cleanups = 0
+    var cleanupFails = false
     var finalSaveFails = false
     var recordingSaveFails = false
     var stopSaveFails = false
@@ -117,10 +118,16 @@ private final class Fixture {
     var insertedAfterDurableText = false
     var automaticOutcome: PasteService.Outcome = .inserted
     var manualOutcome: PasteService.Outcome = .inserted
+    var livePersist: LiveMeetingController.Persist?
+    var liveIssue: (@Sendable (TranscriptionIssue) -> Void)?
+    var liveDraft: (@Sendable (LiveMeetingDraft) -> Void)?
+    var liveRecoveries = 0
+    var liveConfirmedSaveFails = false
+    var recoveredInput: [MeetingTurn] = []
     var levelCallback: (@Sendable (Source, Double) -> Void)?
 
     init(legacyCredential: CredentialSession.ReadResult = .missing, storedProvider: ConnectionProvider? = nil,
-         existingConsent: Bool = false) throws {
+         existingConsent: Bool = false, liveMeetingEnabled: Bool = false) throws {
         credentialVault = CredentialVault(read: { provider, _ in provider == .team ? legacyCredential : .value("local-test-direct") },
                                           write: { _, _ in })
         let vault = credentialVault
@@ -139,7 +146,7 @@ private final class Fixture {
         preferences.set(false, forKey: "keepAudio")
         preferences.set(false, forKey: "includeSummary")
         preferences.set(folder.appendingPathComponent("exports").path, forKey: "saveFolderPath")
-        let operations = AppModel.Operations(makeCapture: { [self] directory, _, _, level, _, _ in
+        var operations = AppModel.Operations(makeCapture: { [self] directory, _, _, level, _, _ in
             let raw = directory.appendingPathComponent("mic-test.wav")
             // Fake capture has real owned recovery data so cleanup assertions inspect disk.
             try! Data("owned recovery audio fixture".utf8).write(to: raw)
@@ -163,6 +170,7 @@ private final class Fixture {
             guard let credential = credentialVault.get(provider) else { throw CheckFailure(description: "Missing synthetic credential") }
             return OpenAIConfig(baseURL: provider.baseURL, authValue: "Bearer " + credential)
         }, save: { [self] store, record in
+            if liveConfirmedSaveFails && record.meetingTurns.contains(where: { $0.state == .confirmed }) { throw CocoaError(.fileWriteOutOfSpace) }
             if recordingSaveFails && record.status == .recording { throw CocoaError(.fileWriteOutOfSpace) }
             if stopSaveFails && !record.tracks.isEmpty && !record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
             if finalSaveFails && record.status == .complete && record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
@@ -170,7 +178,7 @@ private final class Fixture {
             if cancellationSaveFails && record.status == .cancelled { throw CocoaError(.fileWriteOutOfSpace) }
             try store.save(record)
         }, cleanAudio: { [self] store, record in
-            cleanups += 1; try store.cleanAudio(for: record)
+            cleanups += 1; if cleanupFails { throw CocoaError(.fileWriteNoPermission) }; try store.cleanAudio(for: record)
         }, deliverAtCurrentCaret: { [self] text, canDeliver in
             let automatic = model.phase == .transcribing
             let target = currentFocus
@@ -196,6 +204,22 @@ private final class Fixture {
             if formattingCancelled { throw CancellationError() }
             return DictationFormatResult(text: formattedText, failure: formatFailure)
         })
+        if liveMeetingEnabled {
+            operations.makeLiveMeeting = { [self] _, _, _, persist, draft, issue in
+                livePersist = persist; liveDraft = draft; liveIssue = issue
+                return AppModel.MeetingSession(start: {}, offer: { _ in }, finish: { [] }, cancel: { [] })
+            }
+            operations.recoverMeeting = { [self] record, _, _, persist in
+                liveRecoveries += 1; recoveredInput = record.meetingTurns
+                var turns = record.meetingTurns
+                let planned = planMeetingRecovery(tracks: record.tracks, turns: turns)
+                turns = planned.map { turn in
+                    if turn.state == .confirmed { return turn }
+                    var recovered = turn; recovered.state = .confirmed; recovered.text = "Recovered only missing"; return recovered
+                }
+                try await persist(turns); return turns
+            }
+        }
         model = AppModel(store: store, operations: operations, preferences: preferences, initializeSystemState: false,
             credentialAccess: credentialAccess, verificationSession: verificationSession)
         model.micGranted = true; model.acceptConsent()
@@ -770,6 +794,80 @@ struct CoordinatorSelftest {
                 try check(f.model.activeRecord?.status == .complete && f.model.activeRecord?.delivery == .ready &&
                           f.transcriptionRequests == 0 && f.insertions == 0,
                           "Cancelled final text must still recover without upload or automatic insertion")
+            }),
+            ("Updater quit preserves completed dictation history", { f in
+                try await f.beginProcessing(); f.processing.release()
+                try await until("completed dictation before updater") { f.model.phase == .done }
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                let before = try encoder.encode(f.store.load()[0])
+                try check(f.model.acquireUpdateLock(), "Idle completed dictation allows update")
+                f.model.cancelDictation()
+                await f.model.prepareToQuit()
+                let after = try encoder.encode(f.store.load()[0])
+                try check(after == before,
+                          "Updater latch must not cancel or mutate last completed dictation")
+            }),
+            ("Live meeting saves permanent passages and recovers only missing without legacy ASR or delivery", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("live meeting recording") { f.model.phase == .recording }
+                guard let persist = f.livePersist else { throw CheckFailure(description: "Missing live persistence hook") }
+                f.liveIssue?(TranscriptionIssue(source: .system, userMessage: "Safe fixture billing", failureKind: .billingLimit))
+                try await until("source notice received") { f.model.activeRecord?.transcriptionIssues.contains { $0.failureKind == .billingLimit } == true }
+                let turn = MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "Permanent live words")
+                try await persist([turn])
+                try check(f.model.activeRecord?.transcript.contains("Permanent live words") == true &&
+                          f.model.activeRecord?.transcriptionIssues.contains { $0.failureKind == .billingLimit } == true,
+                          "Confirmed passage is durable and another source account issue is retained")
+                try check(!f.model.canBeginUpdate, "Owned live controller blocks updater")
+                f.model.finishRecording()
+                try await until("live meeting finalized") { f.model.phase == .done }
+                let saved = try f.store.load()[0]
+                try check(saved.status == .complete && saved.meetingTurns[0] == turn && saved.meetingTurns.count == 2 &&
+                          saved.transcriptionIssues.isEmpty && f.liveRecoveries == 1 && f.recoveredInput == [turn],
+                          "Recovery appends only unfinished audio and clears remedied source notices")
+                try check(f.transcriptionRequests == 0 && f.formatterRequests == 0 && f.insertions == 0 && f.manualPastes == 0,
+                          "Live meetings never use final rewrite, formatter or paste")
+                let revision = saved.transcriptRevision
+                f.model.retry(saved.id)
+                try check(f.model.activeRecord?.transcriptRevision == revision, "Completed live retry never rewrites confirmed words")
+                await f.close()
+            }),
+            ("Live completed transcript survives audio cleanup failure without retry", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.cleanupFails = true
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("live cleanup fixture recording") { f.model.phase == .recording }
+                f.model.finishRecording()
+                try await until("live cleanup failure completed") { f.model.phase == .done }
+                let saved = try f.store.load()[0]
+                try check(f.cleanups == 1 && f.audioExists() && saved.status == .complete && saved.hasSealedMeetingAudio && saved.hasText,
+                          "Cleanup failure retains raw audio and complete durable text")
+                try check(!saved.canRecover && saved.transcriptionIssues.isEmpty && f.model.serviceNotice(for: saved) == nil &&
+                          saved.issues.isEmpty && f.model.statusDetail.isEmpty,
+                          "Audio retention produces no nonactionable warning, false processing error or Retry")
+                await f.close()
+            }),
+            ("Live passage save failure remains invisible and stale session callbacks cannot mutate history", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("live failed-save recording") { f.model.phase == .recording }
+                guard let persist = f.livePersist else { throw CheckFailure(description: "Missing live hook") }
+                f.liveConfirmedSaveFails = true
+                do {
+                    try await persist([MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "Unsaved")])
+                    throw CheckFailure(description: "Failed passage save unexpectedly succeeded")
+                } catch let failure as CheckFailure { throw failure } catch {}
+                try check(f.model.activeRecord?.hasText == false && f.model.activeRecord?.meetingTurns.isEmpty == true,
+                          "Persistence failure cannot publish provisional words as permanent")
+                f.liveConfirmedSaveFails = false
+                await f.model.prepareToQuit()
+                do {
+                    try await persist([MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "Stale")])
+                    throw CheckFailure(description: "Stale live callback unexpectedly succeeded")
+                } catch let failure as CheckFailure { throw failure } catch {}
+                try check(f.model.records[0].hasText == false && f.insertions == 0, "Late cancelled generation cannot write history")
+                await f.close()
             }),
             ("Paste-last while recording preserves indicator and warning", { f in
                 _ = try f.addHistoricalRecord(); try await f.beginRecording()

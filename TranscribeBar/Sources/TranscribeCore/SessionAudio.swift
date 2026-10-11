@@ -38,6 +38,19 @@ public struct PreviewWindow: Codable, Sendable {
     }
 }
 
+/// Owned canonical samples, emitted only after these exact samples have been written.
+/// The callback is a nonblocking queue offer; capture must never await a provider.
+public struct CapturedAudioFrame: Sendable {
+    public let source: Source
+    public let offset: Double
+    public let pcmFloat32: Data
+    public let rms: Double
+    public var duration: Double { Double(pcmFloat32.count / 4) / 16_000 }
+    public init(source: Source, offset: Double, pcmFloat32: Data, rms: Double) {
+        self.source = source; self.offset = offset; self.pcmFloat32 = pcmFloat32; self.rms = rms
+    }
+}
+
 public struct TranscriptionIssue: Codable, Sendable, Equatable {
     public let source: Source?
     public let spanID: String?

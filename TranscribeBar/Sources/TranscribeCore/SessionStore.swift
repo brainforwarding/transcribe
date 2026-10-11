@@ -38,6 +38,12 @@ public final class SessionStore {
             do {
                 var record = try decoder.decode(SessionRecord.self, from: Data(contentsOf: dir.appendingPathComponent("record.json")))
                 guard record.id.uuidString == dir.lastPathComponent else { throw CocoaError(.fileReadCorruptFile) }
+                if record.liveMeetingVersion != nil && record.status.interrupted {
+                    // A live record can already hold earlier parts while capture manifests
+                    // contain a longer current part. Always reconcile the actual tail.
+                    let captured = recoverTracks(in: dir)
+                    if !captured.isEmpty { record.tracks = captured }
+                }
                 if record.tracks.isEmpty && (record.status.interrupted || record.status == .cancelled || record.status == .failed || record.status == .partial) {
                     let captured = recoverTracks(in: dir)
                     if !captured.isEmpty {
@@ -98,7 +104,7 @@ public final class SessionStore {
     /// Called only after durable, complete text, capture completion and final readers.
     /// Delete only referenced artifacts belonging to this UUID directory.
     public func cleanAudio(for record: SessionRecord) throws {
-        guard record.status == .complete, !record.captureIncomplete else { return }
+        guard record.status == .complete, !record.captureIncomplete, record.hasSealedMeetingAudio else { return }
         let owned = directory(for: record.id).standardizedFileURL.path + "/"
         for url in record.tracks.flatMap({ $0.spans.map(\.url) }) {
             guard url.standardizedFileURL.path.hasPrefix(owned) else { continue }

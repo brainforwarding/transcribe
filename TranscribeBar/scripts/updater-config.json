@@ -1,0 +1,8 @@
+{
+  "sparkleVersion": "2.10.0",
+  "feedURL": "https://raw.githubusercontent.com/brainforwarding/transcribe/master/docs/updates/appcast.xml",
+  "publicKey": "ytiNn8bHff9hfpKOpyZn7mVZvzF2SoNcZ3HnHTg1nf4=",
+  "keychainAccount": "com.sebastianmarambio.transcribe.ed25519",
+  "toolsURL": "https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz",
+  "toolsSHA256": "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+}

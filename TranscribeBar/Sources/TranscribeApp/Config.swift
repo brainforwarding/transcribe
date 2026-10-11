@@ -9,6 +9,8 @@ enum ConnectionProvider: String, CaseIterable, Identifiable {
     var setupTitle: String { self == .openAI ? "Connect OpenAI" : "Connect your team" }
     var baseURL: URL { self == .openAI ? Config.openAIBaseURL : Config.teamBaseURL }
 
+    var realtimeURL: URL { self == .openAI ? Config.openAIRealtimeURL : Config.teamRealtimeURL }
+
     /// Verification checks access without creating audio or requesting generated text.
     func verificationRequest(credential: String) -> URLRequest {
         var request = URLRequest(url: baseURL.appendingPathComponent(self == .openAI ? "models/gpt-transcribe" : "chat/completions"))
@@ -24,6 +26,8 @@ enum ConnectionProvider: String, CaseIterable, Identifiable {
 }
 
 enum Config {
+    static let openAIRealtimeURL = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
+    static let teamRealtimeURL = URL(string: "wss://transcribe-proxy.quiet-bush-25b1.workers.dev/v1/realtime?intent=transcription")!
     static let openAIBaseURL = URL(string: "https://api.openai.com/v1")!
     static let teamBaseURL = URL(string: "https://transcribe-proxy.quiet-bush-25b1.workers.dev/v1")!
 }

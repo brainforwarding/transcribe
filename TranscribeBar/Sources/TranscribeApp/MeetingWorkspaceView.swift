@@ -39,8 +39,8 @@ struct MeetingWorkspaceView: View {
     @State private var showNotesSnapshot = false
     enum ReviewTab: String, CaseIterable { case summary = "Summary", notes = "My notes", transcript = "Transcript" }
     private var capturing: Bool { model.activeSessionID == record.id && (model.phase == .starting || model.phase == .recording) }
-    private var notes: Binding<String> { Binding(get: { model.records.first { $0.id == record.id }?.notes ?? record.notes }, set: { model.updateNotes(record.id, $0) }) }
-    private var summary: Binding<String> { Binding(get: { model.records.first { $0.id == record.id }?.summary ?? record.summary }, set: { model.updateSummary(record.id, $0) }) }
+    private var notes: Binding<String> { Binding(get: { model.editableNotes(for: record.id) }, set: { model.updateNotes(record.id, $0) }) }
+    private var summary: Binding<String> { Binding(get: { model.editableSummary(for: record.id) }, set: { model.updateSummary(record.id, $0) }) }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top, spacing: 12) {
@@ -60,12 +60,46 @@ struct MeetingWorkspaceView: View {
                         EditableTextArea(text: notes, placeholder: "Write what matters…").frame(maxHeight: .infinity).accessibilityLabel("My meeting notes")
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack { Text("Transcript").font(DesignSystem.font(20, weight: .bold)); StatusPill(title: "Preview") }
-                        ScrollView { Text(record.preview.isEmpty ? "Your transcript will appear here." : record.preview).font(DesignSystem.font(15)).foregroundStyle(DesignSystem.muted).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                        HStack { Text("Transcript").font(DesignSystem.font(20, weight: .bold)); StatusPill(title: record.liveMeetingVersion == nil ? "Preview" : "Live") }
+                        if record.liveMeetingVersion != nil {
+                            if let notice = model.serviceNotice(for: record) { Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 16) {
+                                    ForEach(record.segments, id: \.turnID) { segment in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(duration(segment.start) + " · " + segment.label).font(DesignSystem.font(12, weight: .semibold)).foregroundStyle(DesignSystem.muted).help(segment.timing == .audioInterval ? "Approximate passage time" : "Passage time")
+                                            Text(segment.text).textSelection(.enabled)
+                                        }
+                                    }
+                                    ForEach(model.meetingDrafts.values.sorted(by: { $0.source != $1.source ? $0.source < $1.source : $0.itemID < $1.itemID }), id: \.id) { draft in
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text((draft.source == .system ? "System audio" : record.meetingMode == .inPerson ? "Microphone" : "You") + " · Draft")
+                                                .font(DesignSystem.font(12, weight: .semibold))
+                                            Text(draft.text)
+                                        }.foregroundStyle(DesignSystem.muted)
+                                    }
+                                    if record.segments.isEmpty && model.meetingDrafts.isEmpty {
+                                        Text("Your transcript will appear here.").foregroundStyle(DesignSystem.muted)
+                                    }
+                                }.font(DesignSystem.font(15)).frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        } else {
+                            ScrollView { Text(record.preview.isEmpty ? "Your transcript will appear here." : record.preview).font(DesignSystem.font(15)).foregroundStyle(DesignSystem.muted).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                        }
                     }.frame(width: 360, alignment: .topLeading)
                 }.frame(maxHeight: .infinity)
             } else {
                 reviewHeader
+                if record.liveMeetingVersion != nil, let notice = model.serviceNotice(for: record) {
+                    HStack(spacing: 12) {
+                        Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning)
+                        Spacer(minLength: 0)
+                        if let action = notice.action {
+                            Button(notice.buttonTitle) { model.performServiceAction(action, for: record.id) }
+                                .buttonStyle(CirclesButtonStyle()).disabled(model.isBusy)
+                        }
+                    }
+                }
                 if !record.issues.isEmpty { RecordIssuesView(record: record) }
                 Picker("Meeting content", selection: $tab) { ForEach(ReviewTab.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 372)
                 switch tab {
@@ -108,7 +142,7 @@ struct MeetingWorkspaceView: View {
             Text(record.startedAt.formatted(date: .abbreviated, time: .shortened) + " · " + duration(record.duration)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
             Spacer(minLength: 0)
             if record.hasText { ConfirmedCopyButton(accessibilityLabel: "Copy meeting transcript") { model.copyTranscript(record.id) }.buttonStyle(CirclesButtonStyle()); Button("Export") { model.export(record.id) }.buttonStyle(CirclesButtonStyle()) }
-            if record.canRecover { Button("Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(model.isBusy) }
+            if record.canRecover && !(record.liveMeetingVersion != nil && model.serviceNotice(for: record)?.action == .retryTranscription) { Button("Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(model.isBusy) }
         }
     }
     private var summaryPanel: some View {
@@ -118,6 +152,7 @@ struct MeetingWorkspaceView: View {
                 Spacer()
                 if record.hasText { Button(record.summary.isEmpty ? "Generate notes" : "Regenerate") { model.regenerateNotes(record.id) }.buttonStyle(CirclesButtonStyle()).disabled(record.summaryStatus == .processing || model.isBusy) }
             }
+            if record.summaryIsStale { Text("New transcript passages are available. Regenerate to include them.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
             if !record.summary.isEmpty { EditableTextArea(text: summary).frame(minHeight: 120).accessibilityLabel("Generated meeting notes") }
             if !record.summaryEvidence.isEmpty {
                 ScrollView {
@@ -147,7 +182,7 @@ struct MeetingWorkspaceView: View {
                     } else {
                         ForEach(record.segments, id: \.turnID) { segment in
                             VStack(alignment: .leading, spacing: 8) {
-                                Text(duration(segment.start) + " · " + segment.label).font(DesignSystem.font(13, weight: .semibold)).foregroundStyle(DesignSystem.muted)
+                                Text(duration(segment.start) + " · " + segment.label).font(DesignSystem.font(13, weight: .semibold)).foregroundStyle(DesignSystem.muted).help(segment.timing == .audioInterval ? "Approximate passage time" : "Passage time")
                                 Text(segment.text).foregroundStyle(DesignSystem.body).textSelection(.enabled)
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(focusedTurnID == segment.turnID ? DesignSystem.selected : Color.clear, in: RoundedRectangle(cornerRadius: 12)).id(segment.turnID)
                         }

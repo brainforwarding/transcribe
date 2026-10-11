@@ -4,7 +4,14 @@ import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+#if TRANSCRIBE_VALIDATION_FIXTURE
+    let model: AppModel = {
+        do { return try AppModel.makeUpdateValidationModel() }
+        catch { preconditionFailure("Invalid isolated updater validation configuration") }
+    }()
+#else
     let model = AppModel()
+#endif
     private let shortcuts = ShortcutService()
     private let chip = FloatingChipController()
     private var statusItem: NSStatusItem!
@@ -14,16 +21,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shownWidth: CGFloat = 0
     private var pasteShortcutEnabled: Bool?
     private var quitting = false
+    private var updates: UpdateController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         DesignSystem.registerFonts()
+#if TRANSCRIBE_VALIDATION_FIXTURE
+        configureUpdates()
+        if !restoreUpdateResume() { showLibraryWindow() }
+        updates?.start()
+        return
+#endif
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
         add("Start dictation    ⌥ ⌥", #selector(toggleDictation), symbol: "mic", to: menu, tag: 1)
-        add("Start meeting…", #selector(openMeetings), symbol: "video", to: menu)
+        add("Start meeting…", #selector(openMeetings), symbol: "video", to: menu, tag: 2)
         add("Paste last transcript    ⌥ ⇧ V", #selector(pasteLast), symbol: "doc.on.clipboard", to: menu, tag: 3)
         menu.addItem(.separator())
         add("Open Transcribe", #selector(openLibrary), symbol: "waveform", to: menu)
@@ -34,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.showLibrary = { [weak self] in self?.showLibraryWindow() }
         model.showSettings = { [weak self] in self?.openSettings() }
         model.retryShortcuts = { [weak self] in self?.shortcuts.start() }
+        configureUpdates()
         shortcuts.dictationContext = { [weak self] in
             guard let self else { return .disabled }
             if self.model.activeKind == .dictation,
@@ -63,12 +78,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.async { self?.refreshNativeState() }
             }.store(in: &cancellables)
         refreshNativeState()
-        if !model.hasKey { openLibrary() }
+        if !restoreUpdateResume(), !model.hasKey { openLibrary() }
+        updates?.start()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+#if TRANSCRIBE_VALIDATION_FIXTURE
+        return
+#else
         shortcuts.start()
         Task { await model.refreshPermissions() }
+#endif
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -79,6 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard updates?.permitsTermination() != false else { return .terminateCancel }
+#if TRANSCRIBE_VALIDATION_FIXTURE
+        return .terminateNow
+#else
         guard !quitting else { return .terminateLater }
         quitting = true
         Task {
@@ -88,13 +112,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+#endif
     }
 
+    func applicationWillTerminate(_ notification: Notification) { updates?.applicationWillTerminate() }
+
     func menuWillOpen(_ menu: NSMenu) {
+        menu.item(withTag: 2)?.isEnabled = !model.updateInProgress
+        menu.item(withTag: 3)?.isEnabled = !model.updateInProgress
         menu.item(withTag: 3)?.title = model.pasteLastShortcutEnabled
             ? "Paste last transcript    ⌥ ⇧ V" : "Paste last transcript"
         guard let dictation = menu.item(withTag: 1) else { return }
-        if model.activeKind == .dictation, model.isBusy {
+        if model.activeKind == .dictation, [.starting, .recording, .stopping, .transcribing].contains(model.phase) {
             let canFinish = model.phase == .recording || model.phase == .starting
             dictation.title = canFinish ? "Finish dictation    ⌥" : "Transcribing…"
             dictation.image = menuImage(canFinish ? "stop.fill" : "ellipsis.circle")
@@ -132,6 +161,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         image?.isTemplate = true
         statusItem?.button?.image = image
         statusItem?.button?.title = image == nil ? "Transcribe" : ""
+    }
+
+    private func configureUpdates() {
+        updates = UpdateController(model: model, endEditing: { [weak self] in
+            self?.libraryWindow?.makeFirstResponder(nil) ?? true
+        }, windowVisible: { [weak self] in self?.libraryWindow?.isVisible == true })
+    }
+
+    @discardableResult private func restoreUpdateResume() -> Bool {
+        guard let resume = updates?.consumeResume(), let sidebar = AppModel.Sidebar(rawValue: resume.sidebar) else { return false }
+        model.sidebar = sidebar
+        model.selectedRecordID = resume.selectedRecordID.flatMap { id in model.records.contains { $0.id == id } ? id : nil }
+        if resume.windowVisible { showLibraryWindow() }
+        return true
     }
 
     private func menuImage(_ symbol: String) -> NSImage? {

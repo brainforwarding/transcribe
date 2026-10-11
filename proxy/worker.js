@@ -1,3 +1,5 @@
+import { relayTranscription } from "./realtime.js";
+
 // Transcribe — OpenAI proxy (Cloudflare Worker).
 //
 // Holds the shared org OpenAI key server-side so it never ships in the app. Each team
@@ -9,7 +11,7 @@
 //   e.g.  sebastian:a1b2…,catalina:c3d4…
 //
 // Security posture (per review):
-//  - Allowlists exactly two endpoints; rejects everything else.
+//  - Allowlists file transcription, chat, and transcription-only WebSocket upgrades.
 //  - Strips ALL inbound headers; injects the org key server-side only.
 //  - Validates the chat model; never forwards arbitrary models.
 //  - Per-person hourly rate limit via KV (keyed by token owner's name).
@@ -24,7 +26,8 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
-      if (request.method !== "POST") return err(405, "method not allowed");
+      const live = request.method === "GET" && url.pathname === "/v1/realtime";
+      if (request.method !== "POST" && !live) return err(405, "method not allowed");
 
       // Identity: personal team token in the standard Authorization header.
       const auth = request.headers.get("Authorization") || "";
@@ -41,6 +44,8 @@ export default {
         if (n >= cap) return err(429, "rate limit exceeded");
         await env.RATE.put(key, String(n + 1), { expirationTtl: 3600 });
       }
+
+      if (live) return await relayTranscription(request, env);
 
       const cl = request.headers.get("content-length");
       if (cl && +cl > MAX_BODY) return err(413, "payload too large");

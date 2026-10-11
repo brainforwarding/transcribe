@@ -8,8 +8,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0.8 adds subtle successful Copy feedback, simpler dictation actions, a sidebar version and a clearer Quit button to the day-grouped history and actionable service recovery. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. The local 2.0.8 app and signed installer are notarized and stapled; strict signatures, Gatekeeper and mounted-app startup checks pass. Live direct-OpenAI workflows still need validation with an authorized user's key. Use the versioned download link above for this installer.
-
+The published installer is signed and notarized. Building from source uses the current code on your checkout; public release validation is recorded in [the implementation state](../docs/IMPLEMENTATION.md).
 ```bash
 cd TranscribeBar
 ./scripts/make-app.sh release
@@ -31,7 +30,7 @@ Audio and text needed for transcription, dictation formatting and meeting notes 
 
 ## Dictation
 
-- Double-tap Option to start. Tap Option once to finish. A small chip shows input and elapsed time.
+- Double-tap Option to start. Tap Option once to finish. A small chip at the bottom left of the screen shows input and elapsed time.
 - At 4:30 the chip shows the 30-second warning. Recording stops at five minutes.
 - When transcription finishes, the app pastes into the currently focused editable field using Command–V. Keep the intended field focused until it finishes. Secure fields are excluded.
 - In recognized terminal apps, automatic paste and Paste last replace line breaks and control characters with spaces. The app never sends Return. Your original paragraphs remain in history; the explicit Copy action retains them.
@@ -46,8 +45,7 @@ direct speech. An ordered fidelity check rejects changed words, accents, numbers
 technical symbols. Provider failures and timeouts keep the original text. Accepted
 formatting is saved before insertion; the raw transcript remains in the local record.
 The owner verified natural paragraph formatting with real dictation; broader formatting quality remains owner-tested. Dictionary terms
-remain optional recognition hints. Meetings, previews and CLI transcription do not
-use this second pass.
+remain optional recognition hints. Meetings and CLI transcription do not use this second pass.
 
 Dictation history shows full selectable text grouped by day, with each recording's
 time and a compact Copy control that briefly confirms successful copying. Direct Retry or Recover appears only when applicable. Dictation has no Export/Rename menu.
@@ -67,11 +65,19 @@ discarding the saved transcript.
 
 Choose **Online meeting** for microphone plus all audio playing on the Mac, or **In person** for microphone only. Meetings have no five-minute limit. Use a headset for online meetings to reduce acoustic duplication.
 
-Write personal notes while recording. The provisional transcript arrives in finalized windows about every 45 seconds plus processing time; it is replaced by the final transcript. Preview failure does not stop capture. Source indicators distinguish quiet audio from unavailable or interrupted capture. Retry Mac audio can restore capture while preserving gaps.
+Write personal notes beside the live transcript. New meetings use `gpt-live-transcribe`, with separate microphone and Mac-audio connections. Draft words may change while they arrive. Confirmed passages are saved before appearing and stay unchanged, including after you finish recording. The time labels mark captured audio intervals, rather than individual word timestamps. Labels describe audio sources: You / System audio online, Microphone in person. They do not identify individual participants.
 
-Final meeting transcription uses `gpt-4o-transcribe-diarize` for genuine timed turns. Labels describe audio sources: You / System audio online, Microphone in person. They do not identify individual participants. Generated notes use the existing `gpt-4o` summary route and include validated links to transcript turns or the personal-note snapshot. Unknown action owners remain unassigned. Original notes and edited generated notes are stored separately.
+If a connection fails, capture continues locally. When you finish, the app transcribes only missing audio intervals with `gpt-transcribe`; it does not rerun or reformat confirmed passages. Retry resumes missing intervals using saved audio and successful cached results. Account problems show a short message with the relevant action. Historical meetings retain their existing transcription and recovery behavior.
 
-Failed or partial transcription retains audio and accepted chunks for retry. Complete transcripts are saved before audio cleanup. Keep audio in Settings retains successful raw tracks too. History is in `~/Library/Application Support/Transcribe/Sessions`; meeting Markdown exports use the selected save folder. Import existing Markdown through **Settings → Import recordings…**. Originals remain unchanged and are not imported again after export.
+Generated notes remain separate from the transcript. They use the existing `gpt-4o` summary route and include validated links to transcript turns or the personal-note snapshot. A summary made before missing passages arrive is marked for review and can be regenerated. Unknown action owners remain unassigned. Original notes and edited generated notes are stored separately.
+
+Incomplete meetings retain audio for recovery. Complete transcripts are saved before audio cleanup; Keep audio in Settings retains successful raw tracks too. History is in `~/Library/Application Support/Transcribe/Sessions`; meeting Markdown exports use the selected save folder. Import existing Markdown through **Settings → Import recordings…**. Originals remain unchanged and are not imported again after export.
+
+## Updates
+
+Starting with 2.0.9, an available update shows a small **Actualizar** button at the bottom of the sidebar. Click it to download, install and restart. The button changes to **Descargando** and **Instalando** while it works. Active recordings and other ongoing work finish before an update can start. Unsaved edits must be saved before restart; failures offer **Reintentar**.
+
+Install 2.0.9 manually once to receive future updates this way. Updates use signed archives and a signed feed, and each production app is Developer ID signed and notarized. [Updater release instructions](../docs/UPDATER-RELEASE.md).
 
 ## Validate and release
 

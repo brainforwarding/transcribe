@@ -22,6 +22,7 @@ public final class CaptureController: @unchecked Sendable {
     public var onLevel: (@Sendable (Source, Double) -> Void)?
     public var onHealth: (@Sendable (CaptureHealth) -> Void)?
     public var onPreviewWindow: (@Sendable (PreviewWindow) -> Void)?
+    public var onAudioFrame: (@Sendable (CapturedAudioFrame) -> Void)?
 
     public init(outDir: URL, micUniqueID: String?, micOnly: Bool = false) {
         directory = outDir
@@ -37,6 +38,8 @@ public final class CaptureController: @unchecked Sendable {
         system?.onHealth = { [weak self] in self?.handleHealth($0) }
         mic.onPart = { [weak self] _ in self?.schedulePreview() }
         system?.onPart = { [weak self] _ in self?.schedulePreview() }
+        mic.onAudioFrame = { [weak self] in self?.onAudioFrame?($0) }
+        system?.onAudioFrame = { [weak self] in self?.onAudioFrame?($0) }
         mic.onLog = { [weak self] in self?.onLog?($0) }
         system?.onLog = { [weak self] in self?.onLog?($0) }
     }

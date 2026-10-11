@@ -9,8 +9,59 @@ struct LanguageOption: Identifiable, Hashable {
     var code: String? { id == "auto" ? nil : id }
 }
 
+enum UpdatePresentation: Equatable {
+    case hidden, available, checking, downloading, installing, retry
+    var title: String {
+        switch self {
+        case .hidden, .available: return "Actualizar"
+        case .checking, .downloading: return "Descargando"
+        case .installing: return "Instalando"
+        case .retry: return "Reintentar"
+        }
+    }
+    var running: Bool { self == .checking || self == .downloading || self == .installing }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
+#if TRANSCRIBE_VALIDATION_FIXTURE
+    static func makeUpdateValidationModel() throws -> AppModel {
+        guard let identifier = Bundle.main.bundleIdentifier,
+              identifier.hasPrefix("com.sebastianmarambio.transcribe.updatefixture."),
+              let path = Bundle.main.infoDictionary?["TranscribeValidationRoot"] as? String,
+              path.hasPrefix("/"), let preferences = UserDefaults(suiteName: identifier)
+        else { throw ProviderError.invalidResponse }
+        let root = URL(fileURLWithPath: path).standardizedFileURL
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path + "/"
+        let attributes = try FileManager.default.attributesOfItem(atPath: root.path)
+        guard root.resolvingSymlinksInPath().path.hasPrefix(temporary),
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0 == 0o700,
+              attributes[.ownerAccountName] as? String == NSUserName()
+        else { throw ProviderError.invalidResponse }
+        let store = try SessionStore(root: root.appendingPathComponent("Sessions", isDirectory: true))
+        if try store.load().isEmpty {
+            var record = SessionRecord(kind: .meeting, title: "Update validation")
+            record.status = .complete; record.transcript = "Local validation fixture."
+            try store.save(record)
+        }
+        preferences.set(root.appendingPathComponent("Exports", isDirectory: true).path, forKey: "saveFolderPath")
+        let access = CredentialAccess(get: { _ in nil }, unlock: { _ in nil }, set: { _, _ in throw ProviderError.unavailable },
+            status: { _ in nil }, fingerprint: { _ in nil }, legacyConfigured: { false })
+        let operations = Operations(makeCapture: { _, _, _, _, _, _ in
+            CaptureSession(start: { throw ProviderError.unavailable }, stop: { .init(tracks: [], issues: []) },
+                           retrySystemAudio: { throw ProviderError.unavailable })
+        }, transcribe: { _, _, _ in throw ProviderError.unavailable }, uptime: { ProcessInfo.processInfo.systemUptime },
+            credentials: { _ in throw ProviderError.authentication }, save: { try $0.save($1) },
+            cleanAudio: { _, _ in throw ProviderError.unavailable },
+            deliverAtCurrentCaret: { _, _ in .ready(reason: "Disabled in validation fixture") }, copy: { _ in false },
+            automaticTimer: false)
+        let model = AppModel(store: store, operations: operations, preferences: preferences,
+                             initializeSystemState: false, credentialAccess: access)
+        model.sidebar = .meetings; model.selectedRecordID = model.records.first?.id
+        return model
+    }
+#endif
     enum Phase: Equatable { case idle, starting, recording, stopping, transcribing, done, error }
     enum Sidebar: String, CaseIterable { case dictation, meetings, dictionary, settings }
     enum ChipState: Equatable { case hidden, recording, warning, transcribing, inserted, ready, cancelled, failed, silent }
@@ -25,6 +76,13 @@ final class AppModel: ObservableObject {
         let start: () async throws -> Void
         let stop: () async -> Output
         let retrySystemAudio: () async throws -> Void
+        var setAudioFrameHandler: ((@Sendable (CapturedAudioFrame) -> Void)?) -> Void = { _ in }
+    }
+    struct MeetingSession: Sendable {
+        let start: @Sendable () async -> Void
+        let offer: @Sendable (CapturedAudioFrame) -> Void
+        let finish: @Sendable () async -> [MeetingTurn]
+        let cancel: @Sendable () async -> [MeetingTurn]
     }
     struct Operations {
         var makeCapture: (URL, String?, Bool,
@@ -40,6 +98,12 @@ final class AppModel: ObservableObject {
         var copy: (String) -> Bool
         var automaticTimer = true
         var format: ((String, OpenAIConfig) async throws -> DictationFormatResult)? = nil
+        var makeLiveMeeting: ((SessionRecord, URL, OpenAIConfig,
+            @escaping LiveMeetingController.Persist,
+            @escaping @Sendable (LiveMeetingDraft) -> Void,
+            @escaping @Sendable (TranscriptionIssue) -> Void) -> MeetingSession)? = nil
+        var recoverMeeting: ((SessionRecord, URL, OpenAIConfig,
+            @escaping LiveMeetingController.Persist) async throws -> [MeetingTurn])? = nil
 
         @MainActor static func live() -> Operations {
             let paste = PasteService()
@@ -49,7 +113,7 @@ final class AppModel: ObservableObject {
                 return CaptureSession(start: { try await capture.start() }, stop: {
                     let output = await capture.stop()
                     return CaptureSession.Output(tracks: output.tracks, issues: output.issues)
-                }, retrySystemAudio: { try await capture.retrySystemAudio() })
+                }, retrySystemAudio: { try await capture.retrySystemAudio() }, setAudioFrameHandler: { capture.onAudioFrame = $0 })
             }, transcribe: { record, directory, credentials in
                 let kind: TranscriptionKind = record.kind == .dictation ? .dictation
                     : record.meetingMode == .online ? .onlineMeeting : .inPersonMeeting
@@ -63,9 +127,34 @@ final class AppModel: ObservableObject {
                 await paste.deliverAtCurrentCaret(text, canDeliver: canDeliver)
             }, copy: { paste.copy($0) }, format: { raw, credentials in
                 try await formatDictation(raw, config: credentials)
+            }, makeLiveMeeting: { record, url, credentials, persist, draft, issue in
+                let live = LiveMeetingController(realtimeURL: url, config: credentials,
+                    sources: record.meetingMode == .online ? [.mic, .system] : [.mic],
+                    languages: record.language.map { [$0] } ?? [], keywords: record.keywords,
+                    onPersist: persist, onDraft: draft, onIssue: issue)
+                return MeetingSession(start: { await live.start() }, offer: { live.offer($0) },
+                    finish: { await live.finish() }, cancel: { await live.cancel() })
+            }, recoverMeeting: { record, directory, credentials, persist in
+                try await recoverMeetingTurns(tracks: record.tracks, turns: record.meetingTurns, directory: directory,
+                    languages: record.language.map { [$0] } ?? [], keywords: record.keywords,
+                    config: credentials, onPersist: persist)
             })
         }
     }
+    @Published private(set) var updateInProgress = false
+    @Published var updatePresentation: UpdatePresentation = .hidden
+    @Published var updateProgress: Double?
+    @Published var updaterReady = false
+    @Published private(set) var importInProgress = false
+    @Published private(set) var summaryTaskCount = 0
+    @Published private(set) var pendingDialogCount = 0
+    var requestUpdate: (() -> Void)?
+    private var pendingTitles: [UUID: String] = [:]
+    private var pendingNotes: [UUID: String] = [:]
+    private var pendingSummary: [UUID: String] = [:]
+    private var importTask: Task<Void, Never>?
+    private var summaryTasks: [UUID: Task<Void, Never>] = [:]
+
     @Published var phase: Phase = .idle
     @Published var records: [SessionRecord] = []
     @Published var selectedRecordID: UUID?
@@ -84,6 +173,7 @@ final class AppModel: ObservableObject {
     @Published var chipState: ChipState = .hidden
     @Published var chipVisible = false
     @Published private(set) var formattingRecordID: UUID?
+    @Published private(set) var meetingDrafts: [String: LiveMeetingDraft] = [:]
     @Published var shortcutAvailable = false
     @Published var lastTranscript: URL?
     @Published var mics: [MicDevice] = []
@@ -126,6 +216,12 @@ final class AppModel: ObservableObject {
     private var stopTask: Task<Void, Never>?
     private var processingTask: Task<Void, Never>?
     private var formattingTask: Task<Void, Never>?
+    private var liveController: MeetingSession?
+    private var liveStartupTask: Task<Void, Never>?
+    private var liveTask: Task<Void, Never>?
+    private var liveGeneration = UUID()
+    private var liveCredentials: OpenAIConfig?
+    private var stoppingForQuit = false
     private var formattingGeneration = UUID()
     private var previewTask: Task<Void, Never>?
     private var pendingPreview: PreviewWindow?
@@ -138,7 +234,52 @@ final class AppModel: ObservableObject {
     var selectedRecord: SessionRecord? { records.first { $0.id == selectedRecordID } }
     var activeRecord: SessionRecord? { records.first { $0.id == activeSessionID } }
     var lastRecordWithText: SessionRecord? { records.first { $0.kind == .dictation && $0.hasText } }
-    var isBusy: Bool { formattingRecordID != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) }
+    var isBusy: Bool { updateInProgress || formattingRecordID != nil || liveController != nil || liveTask != nil || liveStartupTask != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) }
+    /// All work that must finish naturally before an update can acquire the main-actor latch.
+    var updateBlockingWork: Bool {
+        formattingRecordID != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) ||
+            importInProgress || summaryTaskCount > 0 || manualPasteTask != nil ||
+            keyStatus == .checking || pendingDialogCount > 0 || liveController != nil || liveTask != nil || liveStartupTask != nil
+    }
+    var canBeginUpdate: Bool { !updateInProgress && !updateBlockingWork }
+    func acquireUpdateLock() -> Bool {
+        guard canBeginUpdate, commitPendingEdits() else { return false }
+        updateInProgress = true
+        return true
+    }
+    func updateSafePoint() -> Bool {
+        updateInProgress && !updateBlockingWork && commitPendingEdits()
+    }
+    func releaseUpdateLock() { updateInProgress = false }
+    func stageTitle(_ id: UUID, _ title: String) {
+        guard !updateInProgress, let record = records.first(where: { $0.id == id }) else { return }
+        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty || value == record.title { pendingTitles[id] = nil }
+        else { pendingTitles[id] = value }
+    }
+    @discardableResult func commitPendingEdits() -> Bool {
+        for id in Set(pendingTitles.keys).union(pendingNotes.keys).union(pendingSummary.keys) {
+            guard commitEdits(for: id) else { return false }
+        }
+        return true
+    }
+    private func commitEdits(for id: UUID) -> Bool {
+        let title = pendingTitles[id], notes = pendingNotes[id], summary = pendingSummary[id]
+        guard mutate(id, {
+            if let title { $0.title = title }
+            if let notes { $0.notes = notes }
+            if let summary {
+                $0.summary = summary; $0.summaryEvidenceIDs = []; $0.summaryEvidence = []
+                $0.summaryTranscriptRevision = $0.transcriptRevision
+            }
+        }) else { return false }
+        if pendingTitles[id] == title { pendingTitles[id] = nil }
+        if pendingNotes[id] == notes { pendingNotes[id] = nil }
+        if pendingSummary[id] == summary { pendingSummary[id] = nil }
+        return true
+    }
+    func editableNotes(for id: UUID) -> String { pendingNotes[id] ?? records.first(where: { $0.id == id })?.notes ?? "" }
+    func editableSummary(for id: UUID) -> String { pendingSummary[id] ?? records.first(where: { $0.id == id })?.summary ?? "" }
     var ready: Bool { micGranted && hasKey && consentAccepted && keyStatus != .checking && keyStatus != .rejected }
     var needsSetup: Bool { !ready }
     var micOnly: Bool { get { meetingMode == .inPerson } set { meetingMode = newValue ? .inPerson : .online } }
@@ -199,41 +340,62 @@ final class AppModel: ObservableObject {
         if initializeSystemState { refreshMics(); Task { await refreshPermissions() } }
     }
     func selectRecord(_ id: UUID) { selectedRecordID = id }
-    func acceptConsent() { consentAccepted = true; preferences.set(true, forKey: "consentAccepted") }
+    func acceptConsent() { guard !updateInProgress else { return }; consentAccepted = true; preferences.set(true, forKey: "consentAccepted") }
     func refreshMics() { mics = MicCapture.available(); if let id = selectedMicID, !mics.contains(where: { $0.uniqueID == id }) { selectedMicID = nil } }
     func refreshPermissions() async {
         micGranted = Permissions.micAuthorized(); accessibilityGranted = Permissions.accessibilityAuthorized()
         screenGranted = CGPreflightScreenCaptureAccess(); hasKey = credentialAccess.get(connectionProvider) != nil
         tokenAccessRequired = credentialAccess.needsAccess(connectionProvider)
     }
-    func grantMic() { Task { _ = await Permissions.requestMic(); await refreshPermissions(); refreshMics() } }
-    func grantScreen() { Permissions.requestScreen(); Task { await refreshPermissions() } }
-    func grantAccessibility() { Permissions.requestAccessibility(); Task { await refreshPermissions() } }
+    func grantMic() {
+        guard !updateInProgress else { return }
+        pendingDialogCount += 1
+        Task { defer { pendingDialogCount -= 1 }; _ = await Permissions.requestMic(); await refreshPermissions(); refreshMics() }
+    }
+    func grantScreen() {
+        guard !updateInProgress else { return }
+        pendingDialogCount += 1
+        Permissions.requestScreen()
+        Task { defer { pendingDialogCount -= 1 }; await refreshPermissions() }
+    }
+    func grantAccessibility() { guard !updateInProgress else { return }; Permissions.requestAccessibility(); Task { await refreshPermissions() } }
     func grantShortcuts() {
+        guard !updateInProgress else { return }
         if !Permissions.accessibilityAuthorized() { grantAccessibility() }
         else { Permissions.requestInputMonitoring() }
         retryShortcuts?()
     }
     func chooseFolder() {
+        guard !updateInProgress else { return }
+        pendingDialogCount += 1
+        defer { pendingDialogCount -= 1 }
         let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false; p.directoryURL = saveFolder
         if p.runModal() == .OK, let url = p.url { saveFolder = url }
     }
     func importLegacyRecordings() {
+        guard !updateInProgress, !importInProgress else { return }
         guard let store else { statusDetail = "History storage unavailable"; return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.allowsMultipleSelection = false; panel.directoryURL = saveFolder
         panel.prompt = "Import recordings"
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        pendingDialogCount += 1
+        let response = panel.runModal()
+        pendingDialogCount -= 1
+        guard !updateInProgress, response == .OK, let folder = panel.url else { return }
         let snapshot = records
         statusDetail = "Importing recordings…"
-        Task { [weak self] in
+        importInProgress = true
+        importTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.importInProgress = false; self.importTask = nil }
+            guard !self.updateInProgress else { return }
             do {
                 // Discovery never touches the coordinator's store/JSONEncoder on a background thread.
                 let discovered = try await Task.detached(priority: .utility) {
                     try SessionStore.discoverMarkdown(from: folder, existing: snapshot)
                 }.value
-                guard let self else { return }
+                guard !Task.isCancelled, !self.updateInProgress else { return }
                 // Captures/exports can complete during discovery. Deduplicate against committed state.
                 var known = Set(self.records.flatMap { [$0.importURL, $0.exportURL].compactMap { $0?.standardizedFileURL.path } })
                 var saved: [SessionRecord] = []
@@ -250,7 +412,7 @@ final class AppModel: ObservableObject {
                 self.statusDetail = failed ? "Some recordings could not be imported"
                     : saved.isEmpty ? "No new recordings" : "Imported \(saved.count) recordings"
                 if !saved.isEmpty { self.showLibrary?() }
-            } catch { self?.statusDetail = "Import unavailable" }
+            } catch { if !Task.isCancelled { self.statusDetail = "Import unavailable" } }
         }
     }
     func setConnectionProvider(_ provider: ConnectionProvider) {
@@ -311,7 +473,9 @@ final class AppModel: ObservableObject {
         guard ready, let store else { statusDetail = "Finish setup"; showSettings?(); return }
         guard kind != .meeting || meetingMode != .online || screenGranted else { statusDetail = "Allow Mac audio"; showSettings?(); return }
         let title = kind == .dictation ? "Dictation" : meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let r = SessionRecord(kind: kind, meetingMode: meetingMode, title: title.isEmpty ? "Meeting" : title, language: languages.first { $0.id == languageID }?.code, keywords: dictionaryWords)
+        var newRecord = SessionRecord(kind: kind, meetingMode: meetingMode, title: title.isEmpty ? "Meeting" : title, language: languages.first { $0.id == languageID }?.code, keywords: dictionaryWords)
+        if kind == .meeting, operations.makeLiveMeeting != nil { newRecord.liveMeetingVersion = 1; newRecord.serviceProviderID = connectionProvider.rawValue }
+        let r = newRecord
         do { try operations.save(store, r) } catch { statusDetail = "Recording could not be saved"; phase = .error; return }
         records.insert(r, at: 0); activeSessionID = r.id; activeKind = kind; phase = .starting
         automaticDeliveryID = kind == .dictation ? r.id : nil
@@ -329,8 +493,15 @@ final class AppModel: ObservableObject {
             guard let self, self.activeSessionID == r.id else { return }; self.enqueuePreview(window, id: r.id)
         } }
         let ctl = operations.makeCapture(store.directory(for: r.id), selectedMicID,
-            kind == .dictation || meetingMode == .inPerson, level, health, kind == .meeting ? preview : nil)
+            kind == .dictation || meetingMode == .inPerson, level, health, kind == .meeting && r.liveMeetingVersion == nil ? preview : nil)
         controller = ctl
+        if r.liveMeetingVersion != nil {
+            guard configureLiveMeeting(r, capture: ctl) else {
+                controller = nil; phase = .error; setChip(.failed)
+                // Capture has not started. No microphone or network side effect occurred.
+                return
+            }
+        }
         startupTask = Task { [weak self] in
             do {
                 try await ctl.start(); guard let self, self.activeSessionID == r.id, self.phase == .starting else { return }
@@ -373,7 +544,7 @@ final class AppModel: ObservableObject {
             if h.source == .mic && phase == .recording { finishRecording() }
         }
     }
-    func retrySystemAudio() { guard let controller, phase == .recording else { return }; Task { do { try await controller.retrySystemAudio(); sourceIssue = "" } catch { sourceIssue = "Mac audio unavailable" } } }
+    func retrySystemAudio() { guard !updateInProgress, let controller, phase == .recording else { return }; Task { do { try await controller.retrySystemAudio(); sourceIssue = "" } catch { sourceIssue = "Mac audio unavailable" } } }
     func finishRecording() {
         guard phase == .starting || phase == .recording, let id = activeSessionID, let ctl = controller else { return }
         phase = .stopping; timer?.invalidate(); timer = nil; setChip(activeRecord?.delivery == .cancelled ? .cancelled : .transcribing)
@@ -393,20 +564,148 @@ final class AppModel: ObservableObject {
                 }
             }
             self.controller = nil; self.startupTask = nil
-            guard saved else { self.phase = .error; self.setChip(.failed); return }
-            guard !self.captureStatusSaveFailed else { self.phase = .error; self.setChip(.failed); return }
+            guard saved else { await self.closeLiveWithoutRecovery(); self.phase = .error; self.setChip(.failed); return }
+            guard !self.captureStatusSaveFailed else { await self.closeLiveWithoutRecovery(); self.phase = .error; self.setChip(.failed); return }
+            if self.activeRecord?.liveMeetingVersion != nil { self.processLiveMeeting(id: id, drain: true); return }
             if self.cancelledIDs.contains(id) || self.activeRecord?.delivery == .cancelled { self.phase = .done; self.setChip(.cancelled, dismissAfter: 12) } else { self.process(id: id) }
         }
     }
     func cancelDictation() {
         if formattingRecordID != nil { cancelFormattingRetry(); return }
-        guard activeKind == .dictation, let id = activeSessionID, isBusy else { if activeKind == .meeting { chipVisible = false }; return }
+        guard activeKind == .dictation, let id = activeSessionID,
+              [.starting, .recording, .stopping, .transcribing].contains(phase)
+        else { if activeKind == .meeting { chipVisible = false }; return }
         cancelledIDs.insert(id)
         _ = mutate(id) { $0.delivery = .cancelled; $0.status = .cancelled }; automaticDeliveryID = nil; setChip(.cancelled)
         if phase == .starting || phase == .recording { finishRecording() }
     }
     private enum AppFailure: Error { case missingToken }
     private func config() throws -> OpenAIConfig { try operations.credentials(connectionProvider) }
+    private func livePersistence(id: UUID, generation: UUID) -> LiveMeetingController.Persist {
+        { [weak self] turns in
+            guard let model = self else { throw CancellationError() }
+            try await MainActor.run {
+                guard !Task.isCancelled, !model.updateInProgress, model.liveGeneration == generation,
+                      model.activeSessionID == id, let index = model.records.firstIndex(where: { $0.id == id }),
+                      let store = model.store else { throw CancellationError() }
+                var next = model.records[index]
+                try next.applyMeetingTurns(turns)
+                let sourceIssues = next.transcriptionIssues.filter { $0.spanID == nil && $0.failureKind != nil }
+                next.transcriptionIssues = sourceIssues + next.liveMeetingIssues
+                // The view sees a completed passage only after its entire snapshot
+                // and stable evidence identity have been atomically saved.
+                try model.operations.save(store, next)
+                model.records[index] = next
+            }
+        }
+    }
+    private func configureLiveMeeting(_ record: SessionRecord, capture: CaptureSession) -> Bool {
+        guard let make = operations.makeLiveMeeting, !updateInProgress else { return false }
+        do {
+            let credentials = try config(), generation = UUID()
+            liveGeneration = generation; liveCredentials = credentials; stoppingForQuit = false; meetingDrafts = [:]
+            let session = make(record, connectionProvider.realtimeURL, credentials,
+                livePersistence(id: record.id, generation: generation), { [weak self] draft in Task { @MainActor in
+                    guard let self, self.liveController != nil, self.liveGeneration == generation, self.activeSessionID == record.id else { return }
+                    let key = "\(draft.source.rawValue)-\(draft.itemID)"
+                    if draft.text.isEmpty { self.meetingDrafts.removeValue(forKey: key) }
+                    else { self.meetingDrafts[key] = draft }
+                } }, { [weak self] issue in Task { @MainActor in
+                    guard let self, self.liveController != nil, self.liveGeneration == generation, self.activeSessionID == record.id else { return }
+                    _ = self.mutate(record.id) { if !$0.transcriptionIssues.contains(issue) { $0.transcriptionIssues.append(issue) } }
+                } })
+            liveController = session
+            capture.setAudioFrameHandler { session.offer($0) }
+            liveStartupTask = Task { [weak self] in
+                await session.start()
+                if self?.liveGeneration == generation { self?.liveStartupTask = nil }
+            }
+            return true
+        } catch {
+            _ = mutate(record.id) {
+                $0.status = .failed
+                $0.transcriptionIssues = [.init(userMessage: "Live transcript could not start.",
+                    failureKind: (error as? ProviderError)?.failureKind ?? .invalidCredential)]
+            }
+            return false
+        }
+    }
+    private func closeLiveWithoutRecovery() async {
+        await liveStartupTask?.value
+        if let liveController { _ = await liveController.cancel() }
+        self.liveController = nil; liveStartupTask = nil; liveCredentials = nil
+        liveGeneration = UUID(); meetingDrafts = [:]
+    }
+    /// Dedicated live finalization. It never enters the legacy full-ASR replacement,
+    /// dictation formatter, or automatic-insertion paths.
+    private func processLiveMeeting(id: UUID, drain: Bool) {
+        guard !updateInProgress, liveTask == nil, let store, let initial = records.first(where: { $0.id == id }),
+              initial.liveMeetingVersion != nil else { return }
+        let generation = liveGeneration, session = liveController, provider = connectionProvider
+        phase = .transcribing; setChip(.transcribing)
+        liveTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.liveGeneration == generation {
+                    self.liveTask = nil; self.liveController = nil; self.liveStartupTask = nil
+                    self.liveCredentials = nil; self.meetingDrafts = [:]; self.liveGeneration = UUID()
+                }
+            }
+            do {
+                await self.liveStartupTask?.value
+                if drain, let session {
+                    if self.stoppingForQuit { _ = await session.cancel() } else { _ = await session.finish() }
+                }
+                guard self.liveGeneration == generation, self.activeSessionID == id else { return }
+                self.liveController = nil; self.meetingDrafts = [:]
+                if self.stoppingForQuit || Task.isCancelled { throw CancellationError() }
+                let credentials: OpenAIConfig
+                if drain, let snapshot = self.liveCredentials { credentials = snapshot } else { credentials = try self.config() }
+                if !drain {
+                    guard self.mutate(id, { $0.status = .processing; $0.serviceProviderID = provider.rawValue }) else { throw ProviderError.cacheWrite }
+                }
+                guard let record = self.records.first(where: { $0.id == id }), let recover = self.operations.recoverMeeting else { throw ProviderError.invalidResponse }
+                _ = try await recover(record, store.directory(for: id).appendingPathComponent("chunks/live-recovery"),
+                                      credentials, self.livePersistence(id: id, generation: generation))
+                try Task.checkCancellation()
+                guard self.liveGeneration == generation, self.activeSessionID == id else { return }
+                guard self.mutate(id, {
+                    $0.status = $0.hasSealedMeetingAudio && !$0.captureIncomplete ? .complete : .partial
+                    $0.transcriptionIssues = $0.liveMeetingIssues
+                }) else { throw ProviderError.cacheWrite }
+                self.export(id)
+                if self.includeSummary, self.records.first(where: { $0.id == id })?.hasText == true {
+                    await self.generateNotes(for: id, credentials: credentials)
+                }
+                if !self.keepAudio, let final = self.records.first(where: { $0.id == id }), final.hasSealedMeetingAudio {
+                    do { try self.operations.cleanAudio(store, final) }
+                    catch {
+                        // Cleanup is optional. The durable sealed transcript remains
+                        // complete; any undeleted audio stays in its owned folder.
+                    }
+                }
+                self.phase = .done; self.chipVisible = false
+            } catch is CancellationError {
+                guard self.liveGeneration == generation else { return }
+                _ = self.mutate(id) {
+                    $0.status = .partial
+                    $0.transcriptionIssues = $0.transcriptionIssues.filter { $0.spanID == nil && $0.failureKind != nil } + $0.liveMeetingIssues
+                }
+                self.phase = .done; self.chipVisible = false
+            } catch {
+                guard self.liveGeneration == generation else { return }
+                _ = self.mutate(id) {
+                    $0.status = .partial
+                    $0.transcriptionIssues = $0.transcriptionIssues.filter { $0.spanID == nil && $0.failureKind != nil } + $0.liveMeetingIssues
+                    if $0.transcriptionIssues.isEmpty {
+                        $0.transcriptionIssues = [.init(userMessage: "Meeting transcript could not finish. Audio is saved.",
+                            failureKind: (error as? ProviderError)?.failureKind ?? .unavailable)]
+                    }
+                }
+                self.phase = .error; self.setChip(.failed)
+            }
+        }
+    }
     private func process(id: UUID) {
         guard let r = records.first(where: { $0.id == id }), let store else { return }
         let provider = connectionProvider
@@ -508,6 +807,11 @@ final class AppModel: ObservableObject {
         guard !isBusy, manualPasteTask == nil, let r = records.first(where: { $0.id == id }) else { return }
         cancelledIDs.remove(id)
         automaticDeliveryID = nil; activeSessionID = id; activeKind = r.kind
+        if r.liveMeetingVersion != nil {
+            guard r.canRecover else { return }
+            liveGeneration = UUID(); stoppingForQuit = false
+            processLiveMeeting(id: id, drain: false); return
+        }
         if r.hasText && r.status == .cancelled && r.issues.isEmpty { _ = mutate(id) { $0.status = .complete; $0.delivery = .ready }; phase = .done; setChip(.ready, dismissAfter: 12); return }
         guard r.canRecover, mutate(id, { $0.delivery = $0.kind == .dictation ? .ready : .never }) else { return }; process(id: id)
     }
@@ -593,32 +897,56 @@ final class AppModel: ObservableObject {
             NSWorkspace.shared.open(URL(string: "https://platform.openai.com/settings/organization/billing/overview")!)
         }
     }
-    func regenerateNotes(_ id: UUID) { guard let r = records.first(where: { $0.id == id }), r.kind == .meeting, r.hasText else { return }; Task { do { await generateNotes(for: id, credentials: try config()) } catch { statusDetail = "Add your " + self.connectionProvider.credentialLabel.lowercased() } } }
+    func regenerateNotes(_ id: UUID) {
+        guard !updateInProgress, summaryTasks[id] == nil,
+              let r = records.first(where: { $0.id == id }), r.kind == .meeting, r.hasText else { return }
+        summaryTaskCount += 1
+        summaryTasks[id] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.summaryTasks[id] = nil; self.summaryTaskCount -= 1 }
+            guard !self.updateInProgress, !Task.isCancelled else { return }
+            do { await self.generateNotes(for: id, credentials: try self.config()) }
+            catch { self.statusDetail = "Add your " + self.connectionProvider.credentialLabel.lowercased() }
+        }
+    }
     private func generateNotes(for id: UUID, credentials: OpenAIConfig) async {
-        guard let r = records.first(where: { $0.id == id }), r.summaryStatus != .processing, mutate(id, { $0.summaryStatus = .processing }) else { return }
+        guard !updateInProgress, commitPendingEdits(), let r = records.first(where: { $0.id == id }), r.summaryStatus != .processing, mutate(id, { $0.summaryStatus = .processing }) else { return }
         do {
             let transcript = FinalTranscription(text: r.transcript, segments: r.segments, complete: !r.isPartial, issues: [])
             let generated = try await TranscribeCore.generateNotes(transcription: transcript, originalNotes: r.notes, config: credentials)
             _ = mutate(id) {
-                if $0.summary == r.summary {
+                if $0.summary == r.summary && self.pendingSummary[id] == nil {
                     $0.summary = generated.text; $0.summaryEvidenceIDs = generated.evidence.flatMap(\.turnIDs)
                     $0.summaryEvidence = generated.evidence
                     $0.summaryNotesSnapshot = r.notes
+                    $0.summaryTranscriptRevision = r.transcriptRevision
                 }
                 $0.summaryStatus = .complete
             }; export(id)
         } catch { _ = mutate(id) { $0.summaryStatus = .failed }; statusDetail = "Notes unavailable" }
     }
-    func updateTitle(_ id: UUID, _ title: String) { _ = mutate(id) { $0.title = title } }
-    func updateNotes(_ id: UUID, _ notes: String) { _ = mutate(id) { $0.notes = notes } }
+    @discardableResult func updateTitle(_ id: UUID, _ title: String) -> Bool {
+        guard !updateInProgress else { return false }
+        stageTitle(id, title)
+        guard pendingTitles[id] != nil else { return records.contains { $0.id == id } }
+        return commitEdits(for: id)
+    }
+    func updateNotes(_ id: UUID, _ notes: String) {
+        guard !updateInProgress, records.contains(where: { $0.id == id }) else { return }
+        objectWillChange.send(); pendingNotes[id] = notes
+        _ = commitEdits(for: id)
+    }
     func updateSummary(_ id: UUID, _ text: String) {
-        _ = mutate(id) { $0.summary = text; $0.summaryEvidenceIDs = []; $0.summaryEvidence = [] }
+        guard !updateInProgress, records.contains(where: { $0.id == id }) else { return }
+        objectWillChange.send(); pendingSummary[id] = text
+        _ = commitEdits(for: id)
     }
     func addDictionaryWord(_ word: String) {
+        guard !updateInProgress else { return }
         let v = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard dictionaryWords.count < 100, !v.isEmpty, v.count <= 100, !v.contains(where: { $0.isNewline || $0 == "<" || $0 == ">" }), !dictionaryWords.contains(v) else { return }; dictionaryWords.append(v)
     }
-    func removeDictionaryWord(_ word: String) { dictionaryWords.removeAll { $0 == word } }
+    func removeDictionaryWord(_ word: String) { guard !updateInProgress else { return }; dictionaryWords.removeAll { $0 == word } }
     @discardableResult func copyTranscript(_ id: UUID) -> Bool {
         guard let record = records.first(where: { $0.id == id }), record.hasText else { return false }
         return operations.copy(record.transcript)
@@ -631,9 +959,10 @@ final class AppModel: ObservableObject {
     }
     func pasteLast() {
         guard !isBusy, manualPasteTask == nil, let r = lastRecordWithText else { return }
+        objectWillChange.send()
         manualPasteTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.manualPasteTask = nil }
+            defer { self.objectWillChange.send(); self.manualPasteTask = nil }
             let outcome = await self.operations.deliverAtCurrentCaret(r.transcript, { [weak self] in
                 guard let self, !Task.isCancelled, !self.isBusy else { return false }
                 return self.lastRecordWithText?.id == r.id && self.lastRecordWithText?.transcript == r.transcript
@@ -664,6 +993,7 @@ final class AppModel: ObservableObject {
     }
     func copyLast() { if let r = lastRecordWithText { copyTranscript(r.id) } }
     func export(_ id: UUID) {
+        guard !updateInProgress else { return }
         guard let r = records.first(where: { $0.id == id }), r.hasText else { return }
         do {
             try FileManager.default.createDirectory(at: saveFolder, withIntermediateDirectories: true)
@@ -687,10 +1017,19 @@ final class AppModel: ObservableObject {
     }
     func hideChip() { chipVisible = false }
     func prepareToQuit() async {
+        stoppingForQuit = true
+        importTask?.cancel(); await importTask?.value
+        let summaries = Array(summaryTasks.values)
+        for task in summaries { task.cancel() }
+        for task in summaries { await task.value }
         formattingTask?.cancel(); await formattingTask?.value
-        if activeKind == .dictation, isBusy { cancelDictation() }
+        if activeKind == .dictation, [.starting, .recording, .stopping, .transcribing].contains(phase) { cancelDictation() }
         if phase == .starting || phase == .recording { finishRecording() }
         await stopTask?.value; previewTask?.cancel(); processingTask?.cancel()
+        liveTask?.cancel()
+        if let liveController { _ = await liveController.cancel() }
+        await liveStartupTask?.value; await liveTask?.value
+        self.liveController = nil; liveStartupTask = nil; meetingDrafts = [:]; liveGeneration = UUID()
         manualPasteTask?.cancel(); await manualPasteTask?.value
     }
 }

@@ -13,21 +13,24 @@ public enum Source: Int, Codable, Sendable, Comparable {
 /// tiebreak: Swift's sort is NOT stable, so we carry the original concatenation order
 /// (mic segments first, then system) to reproduce the tested Python output exactly.
 public struct Segment: Codable, Sendable, Equatable {
+    public enum Timing: String, Codable, Sendable { case modelTurn, audioInterval }
     public var start: Double
     public var end: Double
     public var label: String
     public var text: String
     public var source: Source
     public var idx: Int
+    public var timing: Timing?
     public var turnID: String { "turn-\(idx)" }
 
     public init(start: Double, end: Double, label: String, text: String,
-                source: Source, idx: Int = 0) {
+                source: Source, idx: Int = 0, timing: Timing? = nil) {
         self.start = start
         self.end = end
         self.label = label
         self.text = text
         self.source = source
         self.idx = idx
+        self.timing = timing
     }
 }

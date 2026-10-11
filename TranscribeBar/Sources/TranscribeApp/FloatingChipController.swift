@@ -48,7 +48,7 @@ final class FloatingChipController {
         let screen = NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) }
             ?? NSScreen.main ?? NSScreen.screens.first
         guard let frame = screen?.visibleFrame else { return }
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.minY + 20))
+        panel.setFrameOrigin(NSPoint(x: frame.minX + 20, y: frame.minY + 20))
     }
 
     deinit {

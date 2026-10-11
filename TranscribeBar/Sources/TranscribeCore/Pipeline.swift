@@ -1,6 +1,85 @@
 import Foundation
 import AVFoundation
 
+private struct MeetingRecoveryAudio: Codable {
+    let source: Source
+    let start: Double
+    let end: Double
+    let digest: String
+}
+
+/// Fill only unsealed audio intervals. Completed passages are never submitted to
+/// another recognition or formatting pass, and every accepted response is durable
+/// before the next provider request. No silence padding is treated as captured audio.
+public func recoverMeetingTurns(tracks: [SessionAudioTrack], turns original: [MeetingTurn], directory: URL,
+                                languages: [String] = [], keywords: [String] = [], config: OpenAIConfig,
+                                session: URLSession = .shared,
+                                onPersist: @escaping @Sendable ([MeetingTurn]) async throws -> Void) async throws -> [MeetingTurn] {
+    var turns = planMeetingRecovery(tracks: tracks, turns: original)
+    try Task.checkCancellation()
+    try await onPersist(turns)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let cache = directory.appendingPathComponent("transcript-cache", isDirectory: true)
+    for position in turns.indices where turns[position].state != .confirmed {
+        try Task.checkCancellation()
+        let turn = turns[position]
+        do {
+            let audio = directory.appendingPathComponent(turn.turnID + ".wav")
+            let manifest = directory.appendingPathComponent(turn.turnID + ".json")
+            let identity: MeetingRecoveryAudio
+            if FileManager.default.fileExists(atPath: manifest.path) {
+                identity = try JSONDecoder().decode(MeetingRecoveryAudio.self, from: Data(contentsOf: manifest))
+                guard identity.source == turn.source, identity.start == turn.start, identity.end == turn.end,
+                      try audioDigest(audio) == identity.digest else { throw ProviderError.cacheWrite }
+            } else {
+                guard let track = tracks.first(where: { $0.source == turn.source }) else { throw ProviderError.cacheWrite }
+                // Confirm every sample belongs to a captured span before using the
+                // existing renderer. Otherwise its padding would invent coverage.
+                try validateCapturedMeetingInterval(track: track, start: turn.start, end: turn.end)
+                let temporary = directory.appendingPathComponent(UUID().uuidString + ".wav")
+                defer { try? FileManager.default.removeItem(at: temporary) }
+                try writeAlignedAudio(tracks: [track], to: temporary, start: turn.start, duration: turn.end - turn.start, mix: false)
+                identity = MeetingRecoveryAudio(source: turn.source, start: turn.start, end: turn.end, digest: try audioDigest(temporary))
+                if FileManager.default.fileExists(atPath: audio.path) { try FileManager.default.removeItem(at: audio) }
+                try FileManager.default.moveItem(at: temporary, to: audio)
+                try JSONEncoder().encode(identity).write(to: manifest, options: .atomic)
+            }
+            let response = try await cachedAudioTranscript(fileURL: audio, model: .text, languages: languages,
+                keywords: keywords, cacheDir: cache, prompt: nil, config: config, session: session,
+                audioIdentity: identity.digest)
+            try Task.checkCancellation()
+            var next = turns
+            next[position].text = response.text
+            next[position].state = .confirmed; next[position].origin = .recovered; next[position].failureKind = nil
+            try await onPersist(next)
+            turns = next
+        } catch is CancellationError { throw CancellationError() }
+        catch let provider as ProviderError where provider == .cancelled { throw CancellationError() }
+        catch {
+            let failure = (error as? ProviderError)?.failureKind ?? .storage
+            var next = turns
+            next[position].state = .needsRecovery; next[position].failureKind = failure
+            try await onPersist(next); turns = next
+            if failure.allowsRecoveryAfterRemedy || failure == .invalidHints { break }
+        }
+    }
+    return turns
+}
+
+func validateCapturedMeetingInterval(track: SessionAudioTrack, start: Double, end: Double) throws {
+    guard start.isFinite, end.isFinite, end > start else { throw ProviderError.invalidResponse }
+    var cursor = start
+    for span in track.spans.sorted(by: { $0.offset < $1.offset }) where span.offset < end && span.offset + span.duration > start {
+        guard span.offset <= cursor + 1 / 16_000 else { throw ProviderError.cacheWrite }
+        let file = try AVAudioFile(forReading: span.url)
+        guard file.processingFormat.sampleRate == 16_000, file.processingFormat.channelCount == 1,
+              Double(file.length) / 16_000 + 1 / 16_000 >= min(end, span.offset + span.duration) - span.offset
+        else { throw ProviderError.cacheWrite }
+        cursor = max(cursor, min(end, span.offset + span.duration))
+    }
+    guard cursor >= end - 1 / 16_000 else { throw ProviderError.cacheWrite }
+}
+
 public struct PipelineResult {
     public let transcriptURL: URL
     public let conversation: String

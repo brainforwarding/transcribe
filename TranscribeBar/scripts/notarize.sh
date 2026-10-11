@@ -3,17 +3,27 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/build/Transcribe.app"
-DMG="$ROOT/build/Transcribe.dmg"
+APP="${1:-$ROOT/build/Transcribe.app}"
+APP="$(cd "$APP" && pwd -P)"
+DMG="$(dirname "$APP")/Transcribe.dmg"
+FIXTURE=false
+if [ "${2:-}" = "--fixture" ]; then FIXTURE=true
+elif [ -n "${2:-}" ]; then echo "Usage: notarize.sh [app-path] [--fixture]" >&2; exit 1; fi
+verify_app() {
+    if $FIXTURE; then "$ROOT/scripts/verify-app.sh" "$@" --fixture
+    else "$ROOT/scripts/verify-app.sh" "$@"; fi
+}
 PROFILE="${NOTARY_PROFILE:-meetrec-notary}"
-RECEIPTS="$ROOT/build/notarization-results"
+RECEIPTS="$(dirname "$APP")/notarization-results"
 [ -d "$APP" ] || { echo "Signed app not found. Run make-app.sh release first." >&2; exit 1; }
 
 SIGNATURE="$(codesign -dv --verbose=4 "$APP" 2>&1)"
 grep -q 'Authority=Developer ID Application:' <<< "$SIGNATURE" || { echo "Developer ID signature required" >&2; exit 1; }
 grep -q 'flags=.*runtime' <<< "$SIGNATURE" || { echo "Hardened Runtime required" >&2; exit 1; }
 IDENTITY="$(sed -n 's/^Authority=//p' <<< "$SIGNATURE" | head -n 1)"
-"$ROOT/scripts/verify-app.sh" "$APP" --launch
+# Static distribution work does not start the app or touch the owner's store.
+# Explicit isolated launch validation happens separately, after notarization.
+verify_app "$APP"
 
 STAGE="$(mktemp -d "$ROOT/build/notarize.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
@@ -39,7 +49,7 @@ ditto -c -k --keepParent "$APP" "$STAGE/Transcribe.zip"
 submit_artifact app "$STAGE/Transcribe.zip"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
-"$ROOT/scripts/verify-app.sh" "$APP" --distribution
+verify_app "$APP" --distribution
 
 mkdir "$STAGE/image"
 ditto "$APP" "$STAGE/image/Transcribe.app"
@@ -55,7 +65,7 @@ spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG
 MOUNT="$STAGE/mounted"
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$DMG"
 trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true; rm -rf "$STAGE"' EXIT
-"$ROOT/scripts/verify-app.sh" "$MOUNT/Transcribe.app" --distribution --launch
+verify_app "$MOUNT/Transcribe.app" --distribution
 hdiutil detach "$MOUNT"
 trap 'rm -rf "$STAGE"' EXIT
 echo "Verified notarized app and installer → $DMG"

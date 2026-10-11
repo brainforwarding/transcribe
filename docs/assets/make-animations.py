@@ -177,7 +177,7 @@ def dictation():
 
     # chip
     cw, ch = 164, 34
-    cx, cy = W / 2 - cw / 2, 448
+    cx, cy = 20, H - 20 - ch
     b.append(f'<g class="{A.show([(9.5, 97)], final=True, fade=0.8)}">'
              f'<rect x="{cx}" y="{cy + 3}" width="{cw}" height="{ch}" rx="17" fill="#002654" opacity=".08"/>'
              f'<rect class="f-surface s-border" x="{cx}" y="{cy}" width="{cw}" height="{ch}" rx="17"/></g>')
@@ -202,7 +202,7 @@ def dictation():
              f'<path class="s-action" fill="none" stroke-width="1.3" d="M{cx + cw - 27} {mid - 7}h6a2 2 0 0 1 2 2v7"/></g>')
 
     # option key + caption
-    kx, ky = 160, 444
+    kx, ky = 220, 444
     b.append(f'<rect class="f-surface s-border" x="{kx}" y="{ky}" width="44" height="42" rx="8"/>')
     flash = A.show([(6.5, 7.5), (9, 10), (53.5, 54.5)], final=False, fade=0.6)
     b.append(f'<rect class="f-action {flash}" x="{kx}" y="{ky}" width="44" height="42" rx="8"/>')

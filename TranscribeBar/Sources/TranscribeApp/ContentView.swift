@@ -10,15 +10,15 @@ struct ContentView: View {
             } else {
             HStack(spacing: 0) {
             sidebar
-            if model.sidebar == .settings { SettingsView() }
-            else if model.sidebar == .dictionary { DictionaryView() }
-            else if model.records.isEmpty && !model.ready { SetupView() }
+            if model.sidebar == .settings { SettingsView().disabled(freezeContent) }
+            else if model.sidebar == .dictionary { DictionaryView().disabled(freezeContent) }
+            else if model.records.isEmpty && !model.ready { SetupView().disabled(freezeContent) }
             else if model.sidebar == .meetings && model.meetingSetupPresented && !model.isBusy { MeetingSetupView(onCancel: { model.meetingSetupPresented = false }) }
-            else if model.sidebar == .dictation { DictationHistoryView() }
+            else if model.sidebar == .dictation { DictationHistoryView().disabled(validationFixture) }
             else {
                 history
                 if let record = model.selectedRecord, record.kind == .meeting {
-                    MeetingWorkspaceView(record: record)
+                    MeetingWorkspaceView(record: record).disabled(freezeContent)
                 } else { emptyDetail }
             }
         }
@@ -43,9 +43,21 @@ struct ContentView: View {
                 .shadow(color: DesignSystem.shadow, radius: 6, y: 4).padding(16)
             }
         }
-        .onAppear { Task { await model.refreshPermissions(); model.refreshMics() } }
+        .onAppear {
+#if !TRANSCRIBE_VALIDATION_FIXTURE
+            Task { await model.refreshPermissions(); model.refreshMics() }
+#endif
+        }
         .onChange(of: model.activeSessionID) { id in if id != nil { model.meetingSetupPresented = false } }
     }
+    private var validationFixture: Bool {
+#if TRANSCRIBE_VALIDATION_FIXTURE
+        return true
+#else
+        return false
+#endif
+    }
+    private var freezeContent: Bool { validationFixture || model.updateInProgress }
     private var generalNotice: String? {
         let message = model.statusDetail.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !model.records.contains(where: { record in
@@ -64,6 +76,7 @@ struct ContentView: View {
             nav("Dictionary", "history-imgIconBook", selected: model.sidebar == .dictionary) { switchSidebar(.dictionary) }
             nav("Settings", "history-imgIconSetting2", selected: model.sidebar == .settings) { switchSidebar(.settings) }
             Spacer()
+            if model.updatePresentation != .hidden { SidebarUpdateButton() }
             if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
                 Text(version).font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted)
                     .accessibilityLabel("Version \(version)")
@@ -88,7 +101,7 @@ struct ContentView: View {
                 Spacer()
                 Button { if model.sidebar == .meetings { model.meetingSetupPresented = true } else { model.startDictation() } } label: {
                     Text("New").font(DesignSystem.font(14, weight: .semibold)).foregroundStyle(DesignSystem.link).frame(height: 28)
-                }.buttonStyle(.plain).disabled(model.isBusy)
+                }.buttonStyle(.plain).disabled(model.isBusy || validationFixture)
                     .help(model.sidebar == .meetings ? "New meeting" : "Start dictation")
                     .accessibilityLabel(model.sidebar == .meetings ? "New meeting" : "Start dictation")
             }
@@ -113,7 +126,7 @@ struct ContentView: View {
             Text(model.sidebar == .meetings ? "Meeting notes" : "Speak where you work").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
             Text(model.sidebar == .meetings ? "Keep your notes, transcript and summary together." : "Double-tap Option to start. Tap Option once to finish.").foregroundStyle(DesignSystem.muted)
             Button(model.sidebar == .meetings ? "New meeting" : "Try a dictation") { if model.sidebar == .meetings { model.meetingSetupPresented = true } else { model.startDictation() } }
-                .buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(model.isBusy)
+                .buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(model.isBusy || validationFixture)
             Spacer()
         }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -139,13 +152,16 @@ struct EditableRecordTitle: View {
     @State private var title = ""
     @FocusState private var focused: Bool
     var body: some View {
-        TextField("Untitled", text: $title).textFieldStyle(.plain).font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
+        TextField("Untitled", text: Binding(get: { title }, set: { value in
+            title = value; model.stageTitle(record.id, value)
+        })).textFieldStyle(.plain).font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
             .onAppear { title = record.title }.onChange(of: record.id) { _ in title = record.title }
             .focused($focused)
             .onSubmit(commit)
             .onChange(of: focused) { active in if !active { commit() } }
             .onDisappear(perform: commit)
             .accessibilityLabel("Recording title")
+            .disabled(model.updateInProgress)
     }
     private func commit() {
         let value = title.trimmingCharacters(in: .whitespacesAndNewlines)

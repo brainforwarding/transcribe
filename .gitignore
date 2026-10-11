@@ -1,5 +1,6 @@
 # Secrets
 .env
+TranscribeBar/.secrets/
 
 # Recordings / transcripts
 recordings/

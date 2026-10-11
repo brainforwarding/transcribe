@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "scope": "Transcribe macOS update signing",
+  "reference": "op://Sebastian Work/Transcribe — Update signing/credential",
+  "managedPath": "TranscribeBar/.secrets/updater-signing.seed",
+  "format": "base64-encoded 32-byte Ed25519 seed",
+  "publicConfig": "TranscribeBar/scripts/updater-config.json"
+}

@@ -522,6 +522,7 @@ public func runTranscriptionSelftests() async -> Bool {
     contractFailures = []
     let tests = TranscriptionTests()
     let cases: [(String, () async throws -> Void)] = [
+        ("live meeting protocol recovery and durable coverage", { if !(await runLiveMeetingSelftests()) { XCTFail("Live meeting contracts failed") } }),
         ("formatter request and paragraphs", tests.testFormatterRequestAndFaithfulParagraphs),
         ("formatter ordered fidelity guard", tests.testFormatterRejectsWordAccentNumericAndSymbolChanges),
         ("formatter provider and response fallback", tests.testFormatterFallsBackOnProviderAndResponseFailures),

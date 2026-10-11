@@ -31,12 +31,14 @@ public final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     public var onLevel: (@Sendable (Double) -> Void)?
     public var onHealth: (@Sendable (CaptureHealth) -> Void)?
     public var onPart: (@Sendable (AudioSpan) -> Void)?
+    public var onAudioFrame: (@Sendable (CapturedAudioFrame) -> Void)?
     public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))) {
         recorder = PCMTrackWriter(directory: outputURL.deletingLastPathComponent(), source: .mic, epoch: epoch)
         super.init()
         recorder.onLevel = { [weak self] in self?.onLevel?($0) }
         recorder.onHealth = { [weak self] in self?.onHealth?($0) }
         recorder.onPart = { [weak self] in self?.onPart?($0) }
+        recorder.onAudioFrame = { [weak self] in self?.onAudioFrame?($0) }
         for name in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: session, queue: nil) { [weak self] _ in
                 guard let self else { return }

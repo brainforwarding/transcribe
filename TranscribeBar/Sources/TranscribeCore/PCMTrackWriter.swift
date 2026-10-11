@@ -19,6 +19,7 @@ final class PCMTrackWriter {
     var onLevel: ((Double) -> Void)?
     var onPart: ((AudioSpan) -> Void)?
     var onHealth: ((CaptureHealth) -> Void)?
+    var onAudioFrame: ((CapturedAudioFrame) -> Void)?
     private var lastHealth: CaptureHealthState?
     static let rate = 16_000.0
     static let partFrames = 720_000 // 45 seconds
@@ -79,8 +80,11 @@ final class PCMTrackWriter {
             portion.frameLength = AVAudioFrameCount(count)
             dest.update(from: samples + consumed, count: count)
             try file?.write(from: portion)
+            let offset = spans[spans.count - 1].offset + Double(framesInPart) / Self.rate
             consumed += count; framesInPart += count
             spans[spans.count - 1].duration = Double(framesInPart) / Self.rate
+            onAudioFrame?(CapturedAudioFrame(source: source, offset: offset,
+                pcmFloat32: Data(bytes: dest, count: count * MemoryLayout<Float>.size), rms: rms))
             if framesInPart == Self.partFrames { finishPart() }
         }
         if pts - lastManifestTime >= 1 { try persistManifest(); lastManifestTime = pts }

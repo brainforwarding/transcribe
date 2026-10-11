@@ -93,7 +93,7 @@ private struct AudioPayload: Decodable {
     let segments: [AudioTranscriptResponse.TimedSegment]?
 }
 
-private func checkedHints(languages: [String], keywords: [String]) throws {
+func checkedHints(languages: [String], keywords: [String]) throws {
     guard languages.allSatisfy({ value in
         !value.isEmpty && value.count <= 16 && value.unicodeScalars.allSatisfy {
             CharacterSet.letters.contains($0) || $0 == "-"
