@@ -263,9 +263,9 @@ final class PasteService {
         return (result as! AXUIElement)
     }
 
-    func copy(_ text: String) {
+    @discardableResult func copy(_ text: String) -> Bool {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        return NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func focusedElement(in processID: pid_t) -> AXUIElement? {

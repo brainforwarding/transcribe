@@ -3,10 +3,6 @@ import TranscribeCore
 
 struct DictationHistoryView: View {
     @EnvironmentObject var model: AppModel
-    @State private var renameRecordID: UUID?
-    @State private var renameDraft = ""
-    @State private var renamePresented = false
-
     private struct DayGroup: Identifiable {
         let date: Date
         let records: [SessionRecord]
@@ -52,11 +48,7 @@ struct DictationHistoryView: View {
             }
         }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(DesignSystem.surface)
-            .alert("Rename", isPresented: $renamePresented) {
-                TextField("Title", text: $renameDraft)
-                Button("Cancel", role: .cancel) { renameRecordID = nil }
-                Button("Save") { saveTitle() }.disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+
     }
 
     private var header: some View {
@@ -82,6 +74,9 @@ struct DictationHistoryView: View {
         let active = isCaptureActive(record)
         let formatting = model.formattingRecordID == record.id
         let notice = model.serviceNotice(for: record)
+        let recoveryAction: AppModel.ServiceAction? = record.canRecover ? .retryTranscription :
+            (record.formattingFailure != nil && !(record.rawTranscript ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .retryFormatting : nil)
+        let noticeProvidesRetry = recoveryAction != nil && notice?.action == recoveryAction
         let text = record.hasText ? record.transcript : record.preview
         let time = record.startedAt.formatted(date: .omitted, time: .shortened)
         return HStack(alignment: .top, spacing: 16) {
@@ -110,7 +105,7 @@ struct DictationHistoryView: View {
                 } else if let notice {
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-                        if let action = notice.action {
+                        if let action = notice.action, action != .retryFormatting || record.status == .complete {
                             Button(notice.buttonTitle) { model.performServiceAction(action, for: record.id) }
                                 .buttonStyle(.plain).font(DesignSystem.font(13, weight: .semibold))
                                 .foregroundStyle(DesignSystem.link).fixedSize()
@@ -121,37 +116,21 @@ struct DictationHistoryView: View {
             }.frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
                 if record.hasText {
-                    Button("Copy") { model.copyTranscript(record.id) }.buttonStyle(.plain)
+                    ConfirmedCopyButton(accessibilityLabel: "Copy dictation from \(time)") { model.copyTranscript(record.id) }.buttonStyle(.plain)
                         .font(DesignSystem.font(14, weight: .semibold)).foregroundStyle(DesignSystem.link)
-                        .help("Copy dictation").accessibilityLabel("Copy dictation from \(time)")
-                } else if record.canRecover && notice == nil && !active && !formatting {
-                    recoveryButton(record)
                 }
-                Menu {
-                    if record.hasText { Button("Export") { model.export(record.id) } }
-                    Button("Rename…") { rename(record) }
-                    if record.canRecover {
-                        Button(record.status == .cancelled ? "Recover" : "Retry transcription") {
-                            model.performServiceAction(.retryTranscription, for: record.id)
-                        }.disabled(!model.canChangeConnectionProvider)
-                    }
-                    if record.formattingFailure != nil {
-                        Button("Retry formatting") { model.performServiceAction(.retryFormatting, for: record.id) }
-                            .disabled(!model.canRetryFormatting(record))
-                    }
-                } label: {
-                    Text("…").font(DesignSystem.font(18, weight: .semibold)).frame(width: 24, height: 24)
-                }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                    .help("Actions").accessibilityLabel("Actions for dictation from \(time)")
+                if let recoveryAction, !active, !formatting, !noticeProvidesRetry {
+                    Button(record.status == .cancelled ? "Recover" : "Retry") {
+                        model.performServiceAction(recoveryAction, for: record.id)
+                    }.buttonStyle(.plain).font(DesignSystem.font(14, weight: .semibold))
+                        .foregroundStyle(DesignSystem.link)
+                        .disabled(recoveryAction == .retryFormatting ? !model.canRetryFormatting(record) : !model.canChangeConnectionProvider)
+                        .help(recoveryAction == .retryFormatting ? "Retry formatting saved text" : "Retry saved recording")
+                }
             }
         }.padding(.vertical, 16).accessibilityElement(children: .contain)
     }
 
-    private func recoveryButton(_ record: SessionRecord) -> some View {
-        Button(record.status == .cancelled ? "Recover" : "Retry") { model.performServiceAction(.retryTranscription, for: record.id) }
-            .buttonStyle(.plain).font(DesignSystem.font(14, weight: .semibold))
-            .foregroundStyle(DesignSystem.link).disabled(!model.canChangeConnectionProvider)
-    }
     private func isCaptureActive(_ record: SessionRecord) -> Bool {
         record.id == model.activeSessionID && [.starting, .recording, .stopping, .transcribing].contains(model.phase)
     }
@@ -166,16 +145,5 @@ struct DictationHistoryView: View {
         if Calendar.current.isDateInToday(date) { return "Today" }
         if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
         return date.formatted(date: .abbreviated, time: .omitted)
-    }
-    private func rename(_ record: SessionRecord) {
-        renameRecordID = record.id
-        renameDraft = record.title == "Dictation" ? "" : record.title
-        renamePresented = true
-    }
-    private func saveTitle() {
-        let title = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let id = renameRecordID, !title.isEmpty, model.records.contains(where: { $0.id == id && $0.kind == .dictation }) else { return }
-        model.updateTitle(id, title)
-        renameRecordID = nil
     }
 }

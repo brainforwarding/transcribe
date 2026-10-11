@@ -55,11 +55,8 @@ struct SettingsView: View {
                 Toggle("Keep audio", isOn: $model.keepAudio).toggleStyle(.switch)
                 Toggle("Generate meeting summaries", isOn: $model.includeSummary).toggleStyle(.switch)
                 Button("Import recordings…") { model.importLegacyRecordings() }.buttonStyle(CirclesButtonStyle())
-                HStack {
-                    Text("Transcribe \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")").font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted)
-                    Spacer()
-                    Button("Quit Transcribe") { NSApp.terminate(nil) }.buttonStyle(.plain).foregroundStyle(DesignSystem.muted)
-                }.padding(.top, 8)
+                Divider().overlay(DesignSystem.border)
+                Button("Quit Transcribe") { NSApp.terminate(nil) }.buttonStyle(CirclesButtonStyle())
             }.padding(32).frame(maxWidth: 920, alignment: .leading)
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .font(DesignSystem.font()).foregroundStyle(DesignSystem.primary).background(DesignSystem.surface)

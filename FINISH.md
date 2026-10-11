@@ -4,7 +4,7 @@ The native two-mode implementation is tracked in [docs/IMPLEMENTATION.md](docs/I
 
 ## Current release readiness
 
-The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The existing Team token is provisioned and the owner reports working transcription and paragraph formatting. Apple notarization credentials are canonical in **Sebastian Work → Transcribe — Apple notarization**, username/password fields. The local `meetrec-notary` profile is provisioned and validated. Do not publish this version before final workflow verification and notarization. The owner handles real audio, formatting and paste acceptance; agents must not resume those tests without further instruction.
+The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The existing Team token is provisioned and the owner reports working transcription and paragraph formatting. Apple notarization credentials are canonical in **Sebastian Work → Transcribe — Apple notarization**, username/password fields. The local `meetrec-notary` profile is provisioned and validated. The local 2.0.7 app and signed installer passed notarization, stapling, Gatekeeper and mounted-app startup. Do not publish a subsequent version before its distribution checks and the remaining owner workflow acceptance. The owner handles real audio, formatting and paste acceptance; agents must not resume those tests without further instruction.
 
 Development secrets are canonical in 1Password. App tokens go into the existing macOS Keychain service/account through Settings. Do not copy plaintext environment files between computers or replace production worker secrets to create a test token. Existing credential rotation, scope changes or production changes require explicit human approval.
 
@@ -30,10 +30,10 @@ Quit other Transcribe instances before the isolated launch check. Verify the app
 
 The unnecessary restricted `keychain-access-groups` entitlement has been removed. The existing bundle ID, Keychain service/account, Hardened Runtime and microphone entitlement remain. No provisioning profile is needed for these file-based Keychain operations.
 
-## Complete release when credentials are available
+## Complete public release
 
 1. Verify real dictation pasting into the editable field focused when transcription completes, Escape recovery, paste-last, a controlled online/in-person meeting, notes generation and retry behavior. The existing Team token is already provisioned. Verify the direct OpenAI workflows separately when a real authorized key is available. Grant macOS recording/Accessibility permissions where needed. Do not print tokens or recorded private speech in logs.
-2. Provision the existing `meetrec-notary` Keychain profile from the canonical Apple credentials. Do not pass passwords in shell history or store them in Git.
+2. On this Mac, `meetrec-notary` is already provisioned and validated. On a fresh Mac, provision it from the canonical Apple credentials through the secure interactive prompt. Do not pass passwords in shell history or store them in Git.
 3. Run the local checks above against the final source revision, then:
 
    ```bash
@@ -41,7 +41,7 @@ The unnecessary restricted `keychain-access-groups` entitlement has been removed
    NOTARY_PROFILE="meetrec-notary" ./scripts/notarize.sh
    ```
 
-   The script notarizes/staples the app first, creates the DMG containing that stapled app, notarizes/staples the DMG, assesses both and launches the contained app from the mounted final installer. Accepted status and all gates are required.
+   The script notarizes/staples the app first, creates and Developer ID signs the DMG containing that stapled app, notarizes/staples the DMG, assesses both and launches the contained app from the mounted final installer. Accepted status and all gates are required.
 4. Publish `TranscribeBar/build/Transcribe.dmg` to an explicit Mac tag matching the packaged app version, with release notes describing the two modes, connection options and permissions. Use a body file for the exact multiline notes. Do not use `/releases/latest` for Mac installation: Windows tags share this repository.
 5. Download the published asset, mount it read-only, validate staples/signatures/Gatekeeper and launch the contained app. Update installation links to that explicit tag only once the release exists. Confirm fonts/icons without the build resources available.
 

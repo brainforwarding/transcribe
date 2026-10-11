@@ -107,7 +107,7 @@ struct MeetingWorkspaceView: View {
         HStack(spacing: 12) {
             Text(record.startedAt.formatted(date: .abbreviated, time: .shortened) + " · " + duration(record.duration)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
             Spacer(minLength: 0)
-            if record.hasText { Button("Copy") { model.copyTranscript(record.id) }.buttonStyle(CirclesButtonStyle()); Button("Export") { model.export(record.id) }.buttonStyle(CirclesButtonStyle()) }
+            if record.hasText { ConfirmedCopyButton(accessibilityLabel: "Copy meeting transcript") { model.copyTranscript(record.id) }.buttonStyle(CirclesButtonStyle()); Button("Export") { model.export(record.id) }.buttonStyle(CirclesButtonStyle()) }
             if record.canRecover { Button("Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(model.isBusy) }
         }
     }

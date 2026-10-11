@@ -37,7 +37,7 @@ final class AppModel: ObservableObject {
         var save: (SessionStore, SessionRecord) throws -> Void
         var cleanAudio: (SessionStore, SessionRecord) throws -> Void
         var deliverAtCurrentCaret: (String, @escaping @MainActor () -> Bool) async -> PasteService.Outcome
-        var copy: (String) -> Void
+        var copy: (String) -> Bool
         var automaticTimer = true
         var format: ((String, OpenAIConfig) async throws -> DictationFormatResult)? = nil
 
@@ -619,7 +619,10 @@ final class AppModel: ObservableObject {
         guard dictionaryWords.count < 100, !v.isEmpty, v.count <= 100, !v.contains(where: { $0.isNewline || $0 == "<" || $0 == ">" }), !dictionaryWords.contains(v) else { return }; dictionaryWords.append(v)
     }
     func removeDictionaryWord(_ word: String) { dictionaryWords.removeAll { $0 == word } }
-    func copyTranscript(_ id: UUID) { if let r = records.first(where: { $0.id == id }), r.hasText { operations.copy(r.transcript) } }
+    @discardableResult func copyTranscript(_ id: UUID) -> Bool {
+        guard let record = records.first(where: { $0.id == id }), record.hasText else { return false }
+        return operations.copy(record.transcript)
+    }
     private func canAutomaticallyDeliver(id: UUID, text: String) -> Bool {
         guard !Task.isCancelled, phase == .transcribing, activeSessionID == id,
               activeKind == .dictation, automaticDeliveryID == id,

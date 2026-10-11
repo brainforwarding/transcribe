@@ -64,6 +64,10 @@ struct ContentView: View {
             nav("Dictionary", "history-imgIconBook", selected: model.sidebar == .dictionary) { switchSidebar(.dictionary) }
             nav("Settings", "history-imgIconSetting2", selected: model.sidebar == .settings) { switchSidebar(.settings) }
             Spacer()
+            if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !version.isEmpty {
+                Text(version).font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted)
+                    .accessibilityLabel("Version \(version)")
+            }
         }.padding(16).frame(width: 180).frame(maxHeight: .infinity).background(DesignSystem.subtle)
     }
     private func nav(_ title: String, _ icon: String, selected: Bool, action: @escaping () -> Void) -> some View {

@@ -36,12 +36,13 @@ struct ChipView: View {
                 DesignIcon(name: "chip-imgIconTickCircle", size: 14, color: DesignSystem.success)
                 Text("Inserted")
                 Spacer(minLength: 0)
-                iconButton("chip-imgIconCopy", "Copy last") { copyLast() }
+                ConfirmedCopyButton(accessibilityLabel: "Copy last", icon: "chip-imgIconCopy", action: copyLast).buttonStyle(.plain)
             case .ready:
                 DesignIcon(name: "chip-imgIconCopy1", size: 14, color: DesignSystem.action)
                 Text("Ready")
                 Spacer(minLength: 0)
-                linkButton("Copy") { copyLast() }
+                ConfirmedCopyButton(accessibilityLabel: "Copy last", action: copyLast).buttonStyle(.plain)
+                    .foregroundStyle(DesignSystem.link).padding(4)
             case .cancelled:
                 DesignIcon(name: "chip-imgIconClose1", size: 14, color: DesignSystem.muted)
                 Text("Cancelled")
@@ -85,8 +86,9 @@ struct ChipView: View {
         Button(label, action: action).buttonStyle(.plain).foregroundStyle(DesignSystem.link)
             .padding(4).help(label).accessibilityLabel(label)
     }
-    private func copyLast() {
-        if let record = model.lastRecordWithText { model.copyTranscript(record.id) }
+    private func copyLast() -> Bool {
+        guard let record = model.lastRecordWithText else { return false }
+        return model.copyTranscript(record.id)
     }
     private func recover() {
         if let id = model.activeSessionID ?? model.records.first?.id {

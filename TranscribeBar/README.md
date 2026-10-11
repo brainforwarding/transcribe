@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0.7 adds a day-grouped dictation history and actionable account/retry messages to the GPT-6 Luna formatting pass. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. Apple notarization credentials are now provisioned; packaging and final release verification are in progress. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
+Version 2.0.8 adds subtle successful Copy feedback, simpler dictation actions, a sidebar version and a clearer Quit button to the day-grouped history and actionable service recovery. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. The local 2.0.7 app and signed installer are notarized and stapled; Gatekeeper and mounted-app startup checks pass. The 2.0.8 follow-up is being packaged and will be independently notarized before installation. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
 
 ```bash
 cd TranscribeBar
@@ -41,12 +41,12 @@ After saving the raw transcript, the native app uses `gpt-6-luna` with
 direct speech. An ordered fidelity check rejects changed words, accents, numbers or
 technical symbols. Provider failures and timeouts keep the original text. Accepted
 formatting is saved before insertion; the raw transcript remains in the local record.
-The owner is validating formatting quality with real dictation. Dictionary terms
+The owner verified natural paragraph formatting with real dictation; broader formatting quality remains owner-tested. Dictionary terms
 remain optional recognition hints. Meetings, previews and CLI transcription do not
 use this second pass.
 
 Dictation history shows full selectable text grouped by day, with each recording's
-time and compact Copy/Actions controls. Custom titles can be renamed through Actions.
+time and a compact Copy control that briefly confirms successful copying. Direct Retry or Recover appears only when applicable. Dictation has no Export/Rename menu.
 Empty inactive recordings with no recovery or account action are hidden from the view;
 stored history and audio are retained.
 
@@ -80,6 +80,6 @@ swift run transcribe-core selftest
 
 The checks use Command Line Tools without XCTest or network credentials. A local launch is not a notarization check.
 
-Once credentials are available, follow [the implementation state](../docs/IMPLEMENTATION.md) and [release instructions](../FINISH.md). The release script notarizes and staples the app before creating the installer, then verifies the app inside the final DMG. Publish the Mac version through its explicit release URL and verify the downloaded artifact.
+For public distribution, follow [the implementation state](../docs/IMPLEMENTATION.md) and [release instructions](../FINISH.md). The release script notarizes and staples the app before creating and signing the installer, then notarizes/staples the DMG and verifies its contained app. Publish the Mac version through its explicit release URL and verify the downloaded artifact.
 
 The Python CLI and Windows app remain separate entry points.

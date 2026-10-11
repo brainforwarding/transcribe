@@ -108,6 +108,7 @@ private final class Fixture {
     var insertions = 0
     var manualPastes = 0
     var copies = 0
+    var copyResult = true
     var cleanups = 0
     var finalSaveFails = false
     var recordingSaveFails = false
@@ -184,7 +185,7 @@ private final class Fixture {
             deliveryWrites += 1; deliveredFocus = target
             return automatic ? automaticOutcome : manualOutcome
         },
-        copy: { [self] _ in copies += 1 }, automaticTimer: false, format: { [self] raw, config in
+        copy: { [self] _ in copies += 1; return copyResult }, automaticTimer: false, format: { [self] raw, config in
             guard formatterEnabled else { return DictationFormatResult(text: raw) }
             formatterRequests += 1
             seenFormattingConfig = config
@@ -244,6 +245,16 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
+            ("Copy feedback requires a successful clipboard write", { f in
+                try check(!f.model.copyTranscript(UUID()) && f.copies == 0, "Missing record must not claim copy success")
+                let emptyID = try f.addHistoricalRecord(status: .failed)
+                try check(!f.model.copyTranscript(emptyID) && f.copies == 0, "Empty record must not write or claim copy success")
+                let textID = try f.addHistoricalRecord()
+                f.copyResult = false
+                try check(!f.model.copyTranscript(textID) && f.copies == 1, "Failed clipboard write must propagate false")
+                f.copyResult = true
+                try check(f.model.copyTranscript(textID) && f.copies == 2, "Successful clipboard write must propagate true")
+            }),
             ("Formatter failure persists separately and raw text still delivers", { f in
                 f.formatterEnabled = true; f.formattedText = "Saved speech"; f.formatFailure = .unavailable
                 try await f.beginProcessing(); f.processing.release()
