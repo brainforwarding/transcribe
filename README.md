@@ -14,7 +14,7 @@ A dictation can last up to five minutes. If a paste goes wrong, Optionâ€“Shiftâ€
 
 ## Meetings
 
-Record an online call (your microphone plus the audio playing on your Mac) or an in-person conversation (microphone only). You can write your own notes while it records. When you finish, you get the full transcript and a summary with decisions and next steps, each linked to the moment in the transcript where it came up.
+Record an online call (your microphone plus the audio playing on your Mac) or an in-person conversation (microphone only). You can write your own notes while it records. When you finish, you get the full transcript and a summary of decisions and next steps with links back to supporting transcript passages.
 
 <img src="docs/assets/meetings.svg" alt="A meeting is recorded with a live transcript beside your notes, then becomes a summary with decisions and next steps linked to the transcript." width="100%">
 
@@ -27,10 +27,9 @@ Record an online call (your microphone plus the audio playing on your Mac) or an
    - **Accessibility**, for the Option shortcut and for pasting.
    - **Screen & System Audio Recording**, only for online meetings. You may need to quit and reopen Transcribe after granting it.
 
-Audio is sent to OpenAI to be transcribed. Recordings, notes and history stay on your Mac. Tell people before you record them.
+Audio and text needed for transcription, formatting and meeting notes are sent to OpenAI. Your history is stored on your Mac. Tell people before you record them.
 
 ## More
 
 - [App guide](TranscribeBar/README.md): every feature in detail, and how to build from source.
-- [Windows version](windows/README.md): a tray app that records meetings or your own voice into a Markdown transcript.
 - [Command-line recorder](docs/cli.md): `meetrec.py`, the same meeting capture from the terminal.
