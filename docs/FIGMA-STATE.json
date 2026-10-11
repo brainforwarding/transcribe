@@ -1,6 +1,6 @@
 {
   "fileKey": "501FiwrHn8ZJlwbgzjTDly",
-  "scope": "Current native 2.0.9 Figma parity with approved implementation",
+  "scope": "Current native 2.0.10 bounded Figma parity with final source",
   "sourceScreens": [
     "72:575",
     "72:678"
@@ -45,28 +45,34 @@
     "fullViewsVisuallyChecked": true,
     "stateStripVisuallyChecked": true,
     "currentBoardPreserved": true,
-    "rootDirectVisualReview": "Accepted updater available/light, state strip/dark, chip; complete Settings both themes; final live light/dark, review and compact recovery. No further UI changes required.",
+    "rootDirectVisualReview": "Root directly viewed and accepted credential states light/dark and final live-follow note. Rows match actual source copy, alignment and actions; no image UI.",
     "currentDictationDescendants": 605,
     "currentMeetingDescendantsAtValidation": 375,
     "fontMismatches": 0,
     "obsoleteTechnicalMeetingFootnotes": 0,
-    "sourceRuntimeTestClaims": "Figma visual/structural verification only; no owner app or live workflows exercised."
+    "sourceRuntimeTestClaims": "Figma visual/structural verification only; no owner UI, API, audio or clipboard tests.",
+    "credentialRows": 12,
+    "credentialRowSize": [
+      876,
+      36
+    ],
+    "credentialSectionDescendants": 98,
+    "credentialSectionNodeCounts": {
+      "TEXT": 43,
+      "FRAME": 15,
+      "INSTANCE": 28,
+      "SLOT": 12
+    },
+    "credentialSectionFontMismatches": 0,
+    "credentialSectionImageFilledNodes": 0,
+    "fullScreenLayoutProvenance": "Existing2.0.9 full-screen designs retained; this bounded update changes credential-state examples, version labels and behavior notes."
   },
   "exports": [
-    "/tmp/transcribe-209-update-light.png",
-    "/tmp/transcribe-209-update-dark.png",
-    "/tmp/transcribe-209-update-states-light.png",
-    "/tmp/transcribe-209-update-states-dark.png",
-    "/tmp/transcribe-209-settings-light.png",
-    "/tmp/transcribe-209-settings-dark.png",
-    "/tmp/transcribe-209-live-meeting-light.png",
-    "/tmp/transcribe-209-live-meeting-dark.png",
-    "/tmp/transcribe-209-meeting-review-light.png",
-    "/tmp/transcribe-209-meeting-review-dark.png",
-    "/tmp/transcribe-209-meeting-recovery.png",
-    "/tmp/transcribe-209-chip-position.png"
+    "/tmp/transcribe-210-credentials-light.png",
+    "/tmp/transcribe-210-credentials-dark.png",
+    "/tmp/transcribe-210-live-follow-note.png"
   ],
-  "status": "Complete; root accepted final visual parity",
+  "status": "Complete; root accepted changed credential states and final live-follow annotation",
   "chipPosition": {
     "sectionID": "77:748",
     "screenIDs": [
@@ -82,7 +88,7 @@
     "textAndStatesUnchanged": true,
     "visualProof": "/tmp/transcribe-209-chip-position.png"
   },
-  "targetVersion": "2.0.9",
+  "targetVersion": "2.0.10",
   "currentBoardID": "72:567",
   "archiveBoardIDs": [
     "5:1445",
@@ -121,7 +127,12 @@
     "Saved review has Copy/Export, editable notes/summary, Regenerate, claim-linked sources and a brief stale-summary notice.",
     "Stopped live failure uses one compact message and the model-selected remedy; no new banner or modal.",
     "Background staged installer offers are skipped; failed durable save vetoes installation. Final termination retry retains the lock and retries the existing install callback.",
-    "No custom rollback guarantee; the working app is retained on ordinary update failure."
+    "No custom rollback guarantee; the working app is retained on ordinary update failure.",
+    "Current board names, sidebar versions and entry guide are2.0.10; accepted2.0.9 PNGs and complete receipt remain in history.",
+    "Missing, locked and rejected credentials use distinct provider-specific labels and actions. No credential value appears in the design.",
+    "Live records suppress the old large issue panel and retain one compact service notice/remedy.",
+    "Generic and legacy live configuration failures use neutral service wording, not language/dictionary advice.",
+    "Live auto-follow behavior is documented outside the app screen, with no extra visible explainer."
   ],
   "sourceFiles": [
     "TranscribeBar/Sources/TranscribeApp/ContentView.swift",
@@ -129,7 +140,8 @@
     "TranscribeBar/Sources/TranscribeApp/MeetingWorkspaceView.swift",
     "TranscribeBar/Sources/TranscribeApp/UpdateController.swift",
     "TranscribeBar/Sources/TranscribeApp/FloatingChipController.swift",
-    "TranscribeBar/Sources/TranscribeApp/AppModel.swift"
+    "TranscribeBar/Sources/TranscribeApp/AppModel.swift",
+    "TranscribeBar/Sources/TranscribeApp/LiveTranscriptFollow.swift"
   ],
   "readmeAnimation": {
     "generator": "docs/assets/make-animations.py",
@@ -157,6 +169,230 @@
     "meetingReviewDark": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=90-478",
     "updateStates": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=72-776",
     "chipPosition": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=77-748",
-    "stoppedMeetingRecovery": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=93-401"
+    "stoppedMeetingRecovery": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=93-401",
+    "credentialStates": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=100-998",
+    "liveFollowBehavior": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=101-398",
+    "liveFailureBehavior": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=101-399"
+  },
+  "history": [
+    {
+      "version": "2.0.9",
+      "proofType": "Preserved versioned PNG exports and accepted previous receipt; current editable board promoted in place.",
+      "receipt": {
+        "fileKey": "501FiwrHn8ZJlwbgzjTDly",
+        "scope": "Current native 2.0.9 Figma parity with approved implementation",
+        "sourceScreens": [
+          "72:575",
+          "72:678"
+        ],
+        "currentBoardPreserved": "5:1445",
+        "componentName": "Local / Update button",
+        "states": [
+          "available",
+          "busy",
+          "downloading",
+          "installing",
+          "retry"
+        ],
+        "pending": [],
+        "componentSetID": "70:102",
+        "variantIDs": {
+          "available": "70:97",
+          "busy": "70:98",
+          "downloading": "70:99",
+          "installing": "70:100",
+          "retry": "70:101"
+        },
+        "proposalID": "72:567",
+        "screenIDs": [
+          "72:575",
+          "72:678"
+        ],
+        "comparisonID": "72:776",
+        "behaviorID": "72:878",
+        "validation": {
+          "fontFamilies": [
+            "Urbanist",
+            "SF Pro (native symbols only)"
+          ],
+          "imageFilledNodes": 0,
+          "size": [
+            148,
+            32
+          ],
+          "labelSize": 13,
+          "states": 5,
+          "fullViewsVisuallyChecked": true,
+          "stateStripVisuallyChecked": true,
+          "currentBoardPreserved": true,
+          "rootDirectVisualReview": "Accepted updater available/light, state strip/dark, chip; complete Settings both themes; final live light/dark, review and compact recovery. No further UI changes required.",
+          "currentDictationDescendants": 605,
+          "currentMeetingDescendantsAtValidation": 375,
+          "fontMismatches": 0,
+          "obsoleteTechnicalMeetingFootnotes": 0,
+          "sourceRuntimeTestClaims": "Figma visual/structural verification only; no owner app or live workflows exercised."
+        },
+        "exports": [
+          "/tmp/transcribe-209-update-light.png",
+          "/tmp/transcribe-209-update-dark.png",
+          "/tmp/transcribe-209-update-states-light.png",
+          "/tmp/transcribe-209-update-states-dark.png",
+          "/tmp/transcribe-209-settings-light.png",
+          "/tmp/transcribe-209-settings-dark.png",
+          "/tmp/transcribe-209-live-meeting-light.png",
+          "/tmp/transcribe-209-live-meeting-dark.png",
+          "/tmp/transcribe-209-meeting-review-light.png",
+          "/tmp/transcribe-209-meeting-review-dark.png",
+          "/tmp/transcribe-209-meeting-recovery.png",
+          "/tmp/transcribe-209-chip-position.png"
+        ],
+        "status": "Complete; root accepted final visual parity",
+        "chipPosition": {
+          "sectionID": "77:748",
+          "screenIDs": [
+            "77:753",
+            "77:793"
+          ],
+          "chipIDs": [
+            "77:763",
+            "77:803"
+          ],
+          "anchor": "NSScreen.visibleFrame bottom-left20pt on pointer screen",
+          "height": 34,
+          "textAndStatesUnchanged": true,
+          "visualProof": "/tmp/transcribe-209-chip-position.png"
+        },
+        "targetVersion": "2.0.9",
+        "currentBoardID": "72:567",
+        "archiveBoardIDs": [
+          "5:1445",
+          "6:1411"
+        ],
+        "settingsScreenIDs": [
+          "87:799",
+          "87:894"
+        ],
+        "meetingBoardID": "88:292",
+        "liveMeetingScreenIDs": [
+          "88:295",
+          "88:392"
+        ],
+        "meetingReviewScreenIDs": [
+          "90:310",
+          "90:478"
+        ],
+        "meetingRecoveryComparisonID": "93:401",
+        "meetingNoticeComponentID": "93:402",
+        "nativeArrowComponentID": "87:1372",
+        "stateStripIDs": [
+          "72:778",
+          "72:837"
+        ],
+        "entryGuideID": "8:1403",
+        "parityNotes": [
+          "2.0.8 designs remain archived, including the earlier cover concepts.",
+          "Body and button labels preserve Urbanist; SF Pro appears only in native arrow symbols.",
+          "Updater is 148x32, visible only for an offered release; navigation stays available while content mutations are frozen.",
+          "Automatic check in-flight uses the same button and Actualizar label; known download progress uses the 14px ring.",
+          "Current Settings remain embedded, complete, with controls aligned to the shared value column.",
+          "34px recorder/transcription chip anchors 20pt from visible-frame left and bottom on the screen under the pointer, excluding the Dock.",
+          "Live meeting confirms passages separately from drafts; source labels identify audio source, and approximate passage time has a hover hint.",
+          "No technical timing footer in live or review app screens.",
+          "Saved review has Copy/Export, editable notes/summary, Regenerate, claim-linked sources and a brief stale-summary notice.",
+          "Stopped live failure uses one compact message and the model-selected remedy; no new banner or modal.",
+          "Background staged installer offers are skipped; failed durable save vetoes installation. Final termination retry retains the lock and retries the existing install callback.",
+          "No custom rollback guarantee; the working app is retained on ordinary update failure."
+        ],
+        "sourceFiles": [
+          "TranscribeBar/Sources/TranscribeApp/ContentView.swift",
+          "TranscribeBar/Sources/TranscribeApp/SettingsView.swift",
+          "TranscribeBar/Sources/TranscribeApp/MeetingWorkspaceView.swift",
+          "TranscribeBar/Sources/TranscribeApp/UpdateController.swift",
+          "TranscribeBar/Sources/TranscribeApp/FloatingChipController.swift",
+          "TranscribeBar/Sources/TranscribeApp/AppModel.swift"
+        ],
+        "readmeAnimation": {
+          "generator": "docs/assets/make-animations.py",
+          "asset": "docs/assets/dictation.svg",
+          "chipBounds": [
+            20,
+            466,
+            164,
+            34
+          ],
+          "viewport": [
+            960,
+            520
+          ],
+          "validation": "SVG XML parsed; left and bottom insets20px; caption moved clear. Meetings SVG and README release links untouched."
+        },
+        "links": {
+          "currentDictation": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=72-567",
+          "currentMeetings": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=88-292",
+          "settingsLight": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=87-799",
+          "settingsDark": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=87-894",
+          "liveMeetingLight": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=88-295",
+          "liveMeetingDark": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=88-392",
+          "meetingReviewLight": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=90-310",
+          "meetingReviewDark": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=90-478",
+          "updateStates": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=72-776",
+          "chipPosition": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=77-748",
+          "stoppedMeetingRecovery": "https://www.figma.com/design/501FiwrHn8ZJlwbgzjTDly?node-id=93-401"
+        }
+      }
+    }
+  ],
+  "credentialStateSectionID": "100:998",
+  "credentialStateThemeIDs": [
+    "100:1001",
+    "100:1108"
+  ],
+  "liveFollowBehaviorID": "101:398",
+  "liveFailureBehaviorID": "101:399",
+  "credentialRoutingBehaviorID": "100:1214",
+  "credentialStateCopy": {
+    "team": {
+      "missing": "Team token missing",
+      "locked": "Unlock Keychain",
+      "rejected": "Team token not accepted"
+    },
+    "openAI": {
+      "missing": "OpenAI API key missing",
+      "locked": "Unlock Keychain",
+      "rejected": "API key not accepted"
+    },
+    "actions": {
+      "missing": [
+        "Add"
+      ],
+      "locked": [
+        "Unlock",
+        "Add"
+      ],
+      "rejected": [
+        "Replace"
+      ]
+    }
+  },
+  "serviceNoticeCopy": {
+    "teamMissing": "Add your team token in Settings.",
+    "openAIMissing": "Add your OpenAI API key in Settings.",
+    "teamLocked": "Unlock your team token in Settings.",
+    "openAILocked": "Unlock your OpenAI API key in Settings.",
+    "teamRejected": "Your team token was rejected.",
+    "openAIRejected": "Your API key was rejected.",
+    "genericLiveConfiguration": "The transcription service could not accept this request."
+  },
+  "liveFollow": {
+    "scope": "Only the live transcript pane; no saved-review follow animation.",
+    "coalesceMilliseconds": 250,
+    "easing": "ease-out",
+    "animationMilliseconds": 180,
+    "resumeWithinBottomPoints": 32,
+    "manualUpwardScroll": "Pause immediately; cancel pending coalesced scroll.",
+    "resume": "Genuine movement toward the bottom, not content growth or residual animation.",
+    "reduceMotion": "Instant scroll.",
+    "lifecycle": "Cancel pending scroll on pause, record change and disappearance.",
+    "selection": "Preserve native text selection."
   }
 }
