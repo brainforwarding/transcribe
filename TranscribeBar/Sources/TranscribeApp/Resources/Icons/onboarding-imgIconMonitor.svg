@@ -1,0 +1,9 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Icon/monitor">
+<g id="glyph">
+<path fill-rule="evenodd" clip-rule="evenodd" d="M4 2H20C22 2 23 3 23 5V15C23 17 22 18 20 18H4C2 18 1 17 1 15V5C1 3 2 2 4 2ZM4 4H20C20.6667 4 21 4.33333 21 5V15C21 15.6667 20.6667 16 20 16H4C3.33333 16 3 15.6667 3 15V5C3 4.33333 3.33333 4 4 4Z" fill="#374151"/>
+<path d="M11.5 17H12.5C12.8333 17 13 17.1667 13 17.5V20.5C13 20.8333 12.8333 21 12.5 21H11.5C11.1667 21 11 20.8333 11 20.5V17.5C11 17.1667 11.1667 17 11.5 17Z" fill="#374151"/>
+<path d="M8 20H16C16.6667 20 17 20.3333 17 21V21C17 21.6667 16.6667 22 16 22H8C7.33333 22 7 21.6667 7 21V21C7 20.3333 7.33333 20 8 20Z" fill="#374151"/>
+</g>
+</g>
+</svg>

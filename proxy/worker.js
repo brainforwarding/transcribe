@@ -17,7 +17,7 @@
 
 const OPENAI = "https://api.openai.com";
 const MAX_BODY = 26_214_400; // 25 MiB
-const CHAT_MODELS = new Set(["gpt-4o", "gpt-4o-mini"]);
+const CHAT_MODELS = new Set(["gpt-4o", "gpt-4o-mini", "gpt-6-luna"]);
 const RATE_PER_HOUR = 120;
 
 export default {

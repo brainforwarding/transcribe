@@ -1,10 +1,10 @@
 # meetrec — meeting recorder + transcriber (macOS 13+)
 
 > **Two ways to use this:**
-> - **[Transcribe — the menu-bar app](TranscribeBar/README.md)** (fully native Swift, click-to-record). Best for most people and for sharing with coworkers.
+> - **[Transcribe — the native Mac app](TranscribeBar/README.md)** with double-Option dictation, meeting notes, a searchable library and your own OpenAI API key or personal Team token. Version 2.0 publication is pending final validation and Apple notarization.
 > - **the `meetrec.py` CLI below** — the same capture/transcribe pipeline from the terminal.
 >
-> Both produce the same **You / Them** transcript. The app is the recommended path; the CLI is great for scripting.
+> The native app has separate dictation and meeting modes. The Python CLI below keeps its existing capture and transcription behavior.
 
 ---
 

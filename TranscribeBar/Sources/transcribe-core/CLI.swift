@@ -17,7 +17,9 @@ struct CLI {
         switch cmd {
         case "selftest":
             let failures = mergeSelftest() + namingSelftest()
-            if failures.isEmpty { print("selftest: ALL MERGE + NAMING TESTS PASSED"); exit(0) }
+            let contractsPassed = await runTranscriptionSelftests()
+            let storePassed = runSessionStoreSelftests()
+            if failures.isEmpty && contractsPassed && storePassed { print("selftest: ALL MERGE + NAMING + CORE CONTRACT + STORE TESTS PASSED"); exit(0) }
             err("selftest FAILED: \(failures.joined(separator: ", "))"); exit(1)
 
         case "mics":
@@ -56,7 +58,6 @@ struct CLI {
 
     @available(macOS 13.0, *)
     static func recordCmd(_ rawArgs: [String], transcribeAfter: Bool) async {
-        guard #available(macOS 13.0, *) else { err("requires macOS 13+"); exit(1) }
         let micOnly = rawArgs.contains("--mic-only")
         let args = rawArgs.filter { $0 != "--mic-only" }
         guard args.count >= 4 else { usage(); exit(2) }
@@ -86,13 +87,27 @@ struct CLI {
             let config = OpenAIConfig.fromEnv()
             guard config.hasKey else { err("OPENAI_API_KEY not set"); exit(1) }
             do {
-                let t = try await transcribeSession(
-                    micWAV: r.micURL, systemWAV: r.systemURL, chunkDir: outDir,
-                    transcriptURL: outDir.appendingPathComponent("transcript.md"),
-                    title: outDir.lastPathComponent, language: lang, micOffset: r.micOffset,
-                    labelSpeakers: !micOnly, config: config)
-                print("\n=== \(t.transcriptURL.path) ===\n")
-                print((try? String(contentsOf: t.transcriptURL, encoding: .utf8)) ?? "")
+                let result = try await transcribeFinal(tracks: r.tracks,
+                    kind: micOnly ? .dictation : .onlineMeeting,
+                    chunkDir: outDir.appendingPathComponent("work"),
+                    languages: lang.map { [$0] } ?? [], config: config)
+                guard result.complete, r.issues.isEmpty else {
+                    err("Capture/transcription is incomplete. Audio and successful chunks are retained.")
+                    exit(1)
+                }
+                let conversation: String
+                if micOnly { conversation = result.text }
+                else {
+                    let turns = result.segments.map { turn -> Segment in
+                        var turn = turn; turn.label = turn.source == .mic ? "You" : "Them"; return turn
+                    }
+                    conversation = renderConversation(mergeSegments(turns), timestamps: true)
+                }
+                let transcriptURL = outDir.appendingPathComponent("transcript.md")
+                let markdown = "# \(outDir.lastPathComponent)\n\n" + (conversation.isEmpty ? "_(no speech detected)_" : conversation) + "\n"
+                try markdown.write(to: transcriptURL, atomically: true, encoding: .utf8)
+                print("\n=== \(transcriptURL.path) ===\n")
+                print(markdown)
             } catch { err("transcribe failed: \(error)"); exit(1) }
         }
         exit(0)

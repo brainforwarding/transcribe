@@ -2,81 +2,188 @@ import AppKit
 import SwiftUI
 import Combine
 
-/// Manages the menu-bar status item + popover via AppKit (more reliable than SwiftUI's
-/// MenuBarExtra in a SwiftPM-built bundle, which can fail to show its icon).
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let model = AppModel()
+    private let shortcuts = ShortcutService()
+    private let chip = FloatingChipController()
     private var statusItem: NSStatusItem!
-    private let popover = NSPopover()
-    private var settingsWindow: NSWindow?
+    private var libraryWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+    private var showingChip = false
+    private var shownWidth: CGFloat = 0
+    private var pasteShortcutEnabled: Bool?
+    private var quitting = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-
+        DesignSystem.registerFonts()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            setIcon(recording: false)
-            button.imagePosition = .imageLeading
-            button.action = #selector(togglePopover)
-            button.target = self
-        }
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = false
+        add("Start dictation    ⌥ ⌥", #selector(toggleDictation), symbol: "mic", to: menu, tag: 1)
+        add("Start meeting…", #selector(openMeetings), symbol: "video", to: menu)
+        add("Paste last transcript    ⌥ ⇧ V", #selector(pasteLast), symbol: "doc.on.clipboard", to: menu, tag: 3)
+        menu.addItem(.separator())
+        add("Open Transcribe", #selector(openLibrary), symbol: "waveform", to: menu)
+        menu.addItem(.separator())
+        add("Quit Transcribe", #selector(quit), symbol: "power", to: menu)
+        statusItem.menu = menu
 
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: ContentView().environmentObject(model))
-
+        model.showLibrary = { [weak self] in self?.showLibraryWindow() }
         model.showSettings = { [weak self] in self?.openSettings() }
-
-        // Reflect recording state in the menu-bar icon.
-        model.$phase
-            .receive(on: RunLoop.main)
-            .sink { [weak self] phase in self?.setIcon(recording: phase == .recording) }
-            .store(in: &cancellables)
+        model.retryShortcuts = { [weak self] in self?.shortcuts.start() }
+        shortcuts.dictationContext = { [weak self] in
+            guard let self else { return .disabled }
+            if self.model.activeKind == .dictation,
+               self.model.phase == .starting || self.model.phase == .recording,
+               let id = self.model.activeSessionID { return .capturing(id) }
+            return self.model.isBusy ? .disabled : .idle
+        }
+        shortcuts.onStartDictation = { [weak self] in self?.model.startDictation() }
+        shortcuts.onStopDictation = { [weak self] id in
+            guard let self, self.model.activeSessionID == id,
+                  self.model.activeKind == .dictation,
+                  self.model.phase == .starting || self.model.phase == .recording else { return }
+            self.model.finishRecording()
+        }
+        shortcuts.onCancel = { [weak self] in
+            guard let self else { return }
+            if self.model.formattingRecordID != nil { self.model.cancelFormattingRetry() }
+            else if self.model.activeKind == .meeting { self.model.chipVisible = false }
+            else { self.model.cancelDictation() }
+        }
+        shortcuts.onPasteLast = { [weak self] in self?.model.pasteLast() }
+        shortcuts.onAvailabilityChanged = { [weak self] available in self?.model.shortcutAvailable = available }
+        shortcuts.start()
+        model.objectWillChange
+            .sink { [weak self] in
+                // @Published emits before the assignment. Read committed state on the next turn.
+                DispatchQueue.main.async { self?.refreshNativeState() }
+            }.store(in: &cancellables)
+        refreshNativeState()
+        if !model.hasKey { openLibrary() }
     }
 
-    private func setIcon(recording: Bool) {
-        guard let button = statusItem?.button else { return }
-        let name = recording ? "record.circle.fill" : "waveform"
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: "Transcribe")
-        img?.isTemplate = true
-        button.image = img
-        // If the SF Symbol ever fails to load, fall back to text so it's never invisible.
-        button.title = (img == nil) ? "Transcribe" : ""
+    func applicationDidBecomeActive(_ notification: Notification) {
+        shortcuts.start()
+        Task { await model.refreshPermissions() }
     }
 
-    private func openSettings() {
-        popover.performClose(nil)
-        if settingsWindow == nil {
-            let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 360, height: 300),
-                styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            win.title = "Transcribe Settings"
-            win.isReleasedWhenClosed = false
-            win.contentViewController = NSHostingController(rootView: SettingsView().environmentObject(model))
-            win.center()
-            settingsWindow = win
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openLibrary()
+        return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !quitting else { return .terminateLater }
+        quitting = true
+        Task {
+            await model.prepareToQuit()
+            shortcuts.stop()
+            chip.hide()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menu.item(withTag: 3)?.title = model.pasteLastShortcutEnabled
+            ? "Paste last transcript    ⌥ ⇧ V" : "Paste last transcript"
+        guard let dictation = menu.item(withTag: 1) else { return }
+        if model.activeKind == .dictation, model.isBusy {
+            let canFinish = model.phase == .recording || model.phase == .starting
+            dictation.title = canFinish ? "Finish dictation    ⌥" : "Transcribing…"
+            dictation.image = menuImage(canFinish ? "stop.fill" : "ellipsis.circle")
+            dictation.isEnabled = canFinish
+        } else {
+            dictation.title = "Start dictation    ⌥ ⌥"
+            dictation.image = menuImage("mic")
+            dictation.isEnabled = !model.isBusy
+        }
+    }
+
+    private func refreshNativeState() {
+        if pasteShortcutEnabled != model.pasteLastShortcutEnabled {
+            shortcuts.setPasteLastShortcut(enabled: model.pasteLastShortcutEnabled)
+            pasteShortcutEnabled = model.pasteLastShortcutEnabled
+        }
+        shortcuts.consumesEscape = model.formattingRecordID != nil || (model.activeKind == .dictation &&
+            [.starting, .recording, .stopping, .transcribing].contains(model.phase))
+        shortcuts.observesEscapeDuringMeeting = model.activeKind == .meeting && model.isBusy
+        NSApp.appearance = model.appearance == "dark" ? NSAppearance(named: .darkAqua)
+            : model.appearance == "light" ? NSAppearance(named: .aqua) : nil
+        if model.chipVisible, model.chipState != .hidden {
+            if !showingChip || shownWidth != model.chipWidth {
+                chip.show(ChipView(model: model), width: model.chipWidth)
+                showingChip = true
+                shownWidth = model.chipWidth
+            }
+        } else if showingChip {
+            chip.hide()
+            showingChip = false
+        }
+        let name = model.phase == .recording ? "record.circle.fill"
+            : model.phase == .transcribing || model.phase == .stopping ? "ellipsis.circle" : "waveform"
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Transcribe")
+        image?.isTemplate = true
+        statusItem?.button?.image = image
+        statusItem?.button?.title = image == nil ? "Transcribe" : ""
+    }
+
+    private func menuImage(_ symbol: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        image?.size = NSSize(width: 16, height: 16)
+        image?.isTemplate = true
+        return image
+    }
+
+    private func add(_ title: String, _ action: Selector, symbol: String, to menu: NSMenu, tag: Int = 0) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.tag = tag
+        item.indentationLevel = 0
+        item.image = menuImage(symbol)
+        menu.addItem(item)
+    }
+
+    @objc private func toggleDictation() { model.toggleDictation() }
+    @objc private func pasteLast() { model.pasteLast() }
+    @objc private func openMeetings() { model.openMeetings() }
+    @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func openLibrary() {
+        model.sidebar = .dictation
+        model.selectedRecordID = nil
+        model.searchText = ""
+        model.meetingSetupPresented = false
+        showLibraryWindow()
+    }
+
+    private func showLibraryWindow() {
+        if libraryWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            window.title = "Transcribe"
+            window.minSize = NSSize(width: 860, height: 600)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = NSHostingController(rootView: ContentView().environmentObject(model))
+            window.setFrameAutosaveName("TranscribeLibrary")
+            window.center()
+            libraryWindow = window
         }
         NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        // Don't auto-focus the first control (no blue ring on open).
-        settingsWindow?.makeFirstResponder(nil)
-        DispatchQueue.main.async { self.settingsWindow?.makeFirstResponder(nil) }
+        libraryWindow?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func togglePopover() {
-        guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            let win = popover.contentViewController?.view.window
-            win?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            // Don't auto-focus the first control (no blue ring on the Mic picker on open).
-            win?.makeFirstResponder(nil)
-            DispatchQueue.main.async { win?.makeFirstResponder(nil) }
-        }
+    @objc private func openSettings() {
+        model.sidebar = .settings
+        model.selectedRecordID = nil
+        model.searchText = ""
+        model.meetingSetupPresented = false
+        showLibraryWindow()
     }
 }
