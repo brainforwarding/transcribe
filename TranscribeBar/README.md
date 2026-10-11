@@ -2,6 +2,10 @@
 
 Native macOS dictation and meeting notes, using the Circles interface. Apple Silicon, macOS 13 or later.
 
+## Install
+
+[Download Transcribe 2.0.8](https://github.com/brainforwarding/transcribe/releases/download/v2.0.8/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The published download was checked against the notarized artifact, including signatures, staples, Gatekeeper and startup from the mounted installer. [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.0.8).
+
 ## Run from source
 
 Version 2.0.8 adds subtle successful Copy feedback, simpler dictation actions, a sidebar version and a clearer Quit button to the day-grouped history and actionable service recovery. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. The local 2.0.8 app and signed installer are notarized and stapled; strict signatures, Gatekeeper and mounted-app startup checks pass. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.

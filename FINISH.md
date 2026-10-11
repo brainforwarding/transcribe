@@ -2,9 +2,9 @@
 
 The native two-mode implementation is tracked in [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md). The Python CLI and Windows distribution are separate.
 
-## Current release readiness
+## Current release
 
-The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The existing Team token is provisioned and the owner reports working transcription and paragraph formatting. Apple notarization credentials are canonical in **Sebastian Work → Transcribe — Apple notarization**, username/password fields. The local `meetrec-notary` profile is provisioned and validated. The local 2.0.8 app and signed installer passed notarization, stapling, Gatekeeper and mounted-app startup. The owner authorized public 2.0.8 publication; its exact downloaded asset still requires final distribution verification. Subsequent versions require their own distribution checks. The owner handles real audio, formatting and paste acceptance; agents must not resume those tests without further instruction.
+The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The existing Team token is provisioned and the owner reports working transcription and paragraph formatting. Apple notarization credentials are canonical in **Sebastian Work → Transcribe — Apple notarization**, username/password fields. The local `meetrec-notary` profile is provisioned and validated. The local 2.0.8 app and signed installer passed notarization, stapling, Gatekeeper and mounted-app startup. [Mac 2.0.8 is published](https://github.com/brainforwarding/transcribe/releases/tag/v2.0.8). A fresh unauthenticated download matches the notarized artifact and passes signatures, staples, Gatekeeper and mounted startup. Subsequent versions require their own distribution checks. The owner handles real audio, formatting and paste acceptance; agents must not resume those tests without further instruction.
 
 Development secrets are canonical in 1Password. App tokens go into the existing macOS Keychain service/account through Settings. Do not copy plaintext environment files between computers or replace production worker secrets to create a test token. Existing credential rotation, scope changes or production changes require explicit human approval.
 
@@ -30,9 +30,9 @@ Quit other Transcribe instances before the isolated launch check. Verify the app
 
 The unnecessary restricted `keychain-access-groups` entitlement has been removed. The existing bundle ID, Keychain service/account, Hardened Runtime and microphone entitlement remain. No provisioning profile is needed for these file-based Keychain operations.
 
-## Complete public release
+## Future public releases
 
-1. Verify real dictation pasting into the editable field focused when transcription completes, Escape recovery, paste-last, a controlled online/in-person meeting, notes generation and retry behavior. The existing Team token is already provisioned. Verify the direct OpenAI workflows separately when a real authorized key is available. Grant macOS recording/Accessibility permissions where needed. Do not print tokens or recorded private speech in logs.
+1. Coordinate owner-controlled workflow acceptance for future releases. Verify real dictation pasting into the editable field focused when transcription completes, Escape recovery, paste-last, a controlled online/in-person meeting, notes generation and retry behavior. The existing Team token is already provisioned. Verify the direct OpenAI workflows separately when a real authorized key is available. Grant macOS recording/Accessibility permissions where needed. Do not print tokens or recorded private speech in logs.
 2. On this Mac, `meetrec-notary` is already provisioned and validated. On a fresh Mac, provision it from the canonical Apple credentials through the secure interactive prompt. Do not pass passwords in shell history or store them in Git.
 3. Run the local checks above against the final source revision, then:
 
