@@ -84,9 +84,9 @@ struct KeyStatusLabel: View {
         switch model.keyStatus {
         case .checking: return "Checking…"
         case .verified: return "Connected"
-        case .rejected: return model.connectionProvider == .openAI ? "Key not accepted" : "Token not accepted"
+        case .rejected: return model.connectionProvider == .openAI ? "API key not accepted" : "Team token not accepted"
         case .savedUnverified: return "Saved · check connection"
-        case .idle: return model.tokenAccessRequired ? "Unlock Keychain" : model.hasKey ? "Saved in Keychain" : "Not connected"
+        case .idle: return model.tokenAccessRequired ? "Unlock Keychain" : model.hasKey ? "Saved in Keychain" : model.connectionProvider == .team ? "Team token missing" : "OpenAI API key missing"
         }
     }
 }

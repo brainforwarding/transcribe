@@ -6,8 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
 APP="$ROOT/build/Transcribe.app"
 IDENTITY="${SIGN_IDENTITY:-}"
-VERSION="${APP_VERSION:-2.0.9}"
-BUILD_NUMBER="${APP_BUILD_NUMBER:-11}"
+VERSION="${APP_VERSION:-2.0.10}"
+BUILD_NUMBER="${APP_BUILD_NUMBER:-12}"
 FIXTURE="${TRANSCRIBE_VALIDATION_FIXTURE:-false}"
 SWIFT_OPTIONS=(build -c "$CONFIG" --package-path "$ROOT" --product TranscribeApp --arch arm64)
 case "$FIXTURE" in

@@ -2,11 +2,11 @@ import Foundation
 
 /// Safe categories only. Provider bodies, messages and credential values are never persisted.
 public enum ServiceFailureKind: String, Codable, Sendable, Equatable {
-    case invalidCredential, accessDenied, insufficientCredits, billingLimit, rateLimited
+    case credentialMissing, credentialLocked, invalidCredential, accessDenied, configuration, insufficientCredits, billingLimit, rateLimited
     case unavailable, invalidResponse, invalidHints, tooLarge, storage
     public var allowsRecoveryAfterRemedy: Bool {
         switch self {
-        case .invalidCredential, .accessDenied, .insufficientCredits, .billingLimit: return true
+        case .credentialMissing, .credentialLocked, .invalidCredential, .accessDenied, .configuration, .insufficientCredits, .billingLimit: return true
         default: return false
         }
     }
@@ -29,6 +29,7 @@ extension ProviderError {
         case .unavailable: return .unavailable
         case .invalidResponse: return .invalidResponse
         case .invalidHints: return .invalidHints
+        case .configuration: return .configuration
         case .tooLarge: return .tooLarge
         case .cacheWrite: return .storage
         case .rejected: return .accessDenied
@@ -49,13 +50,15 @@ func classifiedProviderError(status: Int, body: Data) -> ProviderError {
     case "rate_limit_exceeded", "slow_down": return .quota
     case "invalid_api_key", "not_authenticated": return .authentication
     case "account_deactivated", "permission_denied", "access_denied", "model_not_allowed", "model_not_found": return .accessDenied
-    case "invalid_value", "invalid_request", "invalid_config": return .invalidHints
+    case "invalid_value", "invalid_request", "invalid_config": return .configuration
     default: break
     }
     if detail?.type == "insufficient_quota" { return .billingLimit }
     if detail?.type == "authentication_error" { return .authentication }
     if detail?.type == "permission_error" { return .accessDenied }
+    if detail?.type == "invalid_request_error" { return .configuration }
     switch status {
+    case 400, 422: return .configuration
     case 401: return .authentication
     case 403: return .accessDenied
     case 413: return .tooLarge

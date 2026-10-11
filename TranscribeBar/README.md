@@ -24,6 +24,8 @@ Open **Settings → Connection** and choose **OpenAI** to enter your own OpenAI 
 
 If you already have a personal token for this app's shared proxy, choose **Team** instead. Existing installations retain their Team connection. The app stores each credential separately in the macOS Keychain and sends it only to its selected provider. Switching connections preserves both saved credentials. Development credentials remain canonical in 1Password.
 
+Recording checks the selected connection first. Missing keys or tokens open Settings with the relevant credential named; blocked Keychain access offers Unlock. Fixing a credential lets you retry previously saved audio.
+
 Allow Microphone for recording and Accessibility for double Option and cursor insertion. Online meetings additionally need Screen & System Audio Recording. macOS may require quitting and reopening after granting that permission. In-person meetings and dictation only use the microphone.
 
 Audio and text needed for transcription, dictation formatting and meeting notes are sent to OpenAI. Recordings and history are stored on this Mac. Let participants know before recording.
@@ -66,6 +68,8 @@ discarding the saved transcript.
 Choose **Online meeting** for microphone plus all audio playing on the Mac, or **In person** for microphone only. Meetings have no five-minute limit. Use a headset for online meetings to reduce acoustic duplication.
 
 Write personal notes beside the live transcript. New meetings use `gpt-live-transcribe`, with separate microphone and Mac-audio connections. Draft words may change while they arrive. Confirmed passages are saved before appearing and stay unchanged, including after you finish recording. The time labels mark captured audio intervals, rather than individual word timestamps. Labels describe audio sources: You / System audio online, Microphone in person. They do not identify individual participants.
+
+The live transcript follows new text with short, smooth movements. Scroll up to read earlier passages without being pulled back; return to the bottom to resume following. Reduce Motion disables the animation. Notes and finished transcripts retain their own scroll positions.
 
 If a connection fails, capture continues locally. When you finish, the app transcribes only missing audio intervals with `gpt-transcribe`; it does not rerun or reformat confirmed passages. Retry resumes missing intervals using saved audio and successful cached results. Account problems show a short message with the relevant action. Historical meetings retain their existing transcription and recovery behavior.
 

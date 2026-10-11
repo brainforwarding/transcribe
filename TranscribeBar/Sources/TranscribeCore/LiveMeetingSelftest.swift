@@ -176,12 +176,12 @@ public func runLiveMeetingSelftests() async -> Bool {
                           && abs(written[0].duration - spans[0].duration) < 0.000001, "callbacks match successfully written spans")
         }),
         ("safe realtime account and configuration aliases", {
-            for (code, expected) in [("account_deactivated", ServiceFailureKind.accessDenied), ("billing_hard_limit_reached", .billingLimit), ("invalid_config", .invalidHints)] {
+            for (code, expected) in [("account_deactivated", ServiceFailureKind.accessDenied), ("billing_hard_limit_reached", .billingLimit), ("invalid_config", .configuration)] {
                 let data = try JSONSerialization.data(withJSONObject: ["type": "error", "error": ["code": code]])
                 let parsed = try LiveTranscriptionEvent.parse(data)
                 try liveCheck(parsed.failure == expected, "account failures do not become network reconnect loops")
             }
-            for (type, expected) in [("authentication_error", ServiceFailureKind.invalidCredential), ("permission_error", .accessDenied)] {
+            for (type, expected) in [("authentication_error", ServiceFailureKind.invalidCredential), ("permission_error", .accessDenied), ("invalid_request_error", .configuration)] {
                 let data = try JSONSerialization.data(withJSONObject: ["type": "error", "error": ["code": "unknown", "type": type]])
                 let parsed = try LiveTranscriptionEvent.parse(data)
                 try liveCheck(parsed.failure == expected, "safe error types classify unknown codes")

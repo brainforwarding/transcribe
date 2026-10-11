@@ -116,6 +116,11 @@ private final class TranscriptionTests {
             (401, #"{"error":{"message":"NEVER_ECHO"}}"#, .authentication),
             (403, #"{"error":"model not allowed"}"#, .accessDenied),
             (503, #"{"error":{"message":"NEVER_ECHO"}}"#, .unavailable),
+            (400, #"{"error":{"code":"invalid_config","message":"NEVER_ECHO"}}"#, .configuration),
+            (400, #"{"error":{"code":"invalid_request"}}"#, .configuration),
+            (400, #"{"error":{"code":"invalid_value"}}"#, .configuration),
+            (400, #"{"error":{"type":"invalid_request_error"}}"#, .configuration),
+            (400, #"{"error":{"message":"NEVER_ECHO"}}"#, .configuration),
             (429, String(repeating: " ", count: 16_385) + #"{"error":{"code":"credit_balance_exhausted"}}"#, .quota)
         ]
         let input = try audio()

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import Security
 import TranscribeCore
 
 struct LanguageOption: Identifiable, Hashable {
@@ -120,7 +121,10 @@ final class AppModel: ObservableObject {
                 return try await transcribeFinal(tracks: record.tracks, kind: kind, chunkDir: directory,
                     languages: record.language.map { [$0] } ?? [], keywords: record.keywords, config: credentials)
             }, uptime: { ProcessInfo.processInfo.systemUptime }, credentials: { provider in
-                guard let token = Keychain.get(for: provider), !token.isEmpty else { throw AppFailure.missingToken }
+                guard let token = Keychain.get(for: provider), !token.isEmpty else {
+                    throw Keychain.cachedReadStatus(for: provider).map { $0 != errSecItemNotFound && $0 != errSecSuccess } == true
+                        ? AppFailure.lockedToken : AppFailure.missingToken
+                }
                 return OpenAIConfig(baseURL: provider.baseURL, authValue: "Bearer \(token)")
             }, save: { try $0.save($1) }, cleanAudio: { try $0.cleanAudio(for: $1) },
             deliverAtCurrentCaret: { text, canDeliver in
@@ -436,7 +440,7 @@ final class AppModel: ObservableObject {
             statusDetail = ""
         } else {
             if keyStatus == .idle || keyStatus == .savedUnverified { keyStatus = .idle }
-            statusDetail = tokenAccessRequired ? "Credential access required" : "Add your " + connectionProvider.credentialLabel.lowercased()
+            statusDetail = tokenAccessRequired ? "Unlock your " + connectionProvider.credentialLabel.lowercased() + " in Settings." : "Add your " + connectionProvider.credentialLabel.lowercased() + " in Settings."
         }
     }
     func saveAndVerifyKey(_ key: String) async -> Bool {
@@ -470,6 +474,7 @@ final class AppModel: ObservableObject {
     func startMeeting() { start(kind: .meeting) }
     private func start(kind: SessionKind) {
         guard !isBusy, manualPasteTask == nil else { return }
+        guard ensureCredentials() else { return }
         guard ready, let store else { statusDetail = "Finish setup"; showSettings?(); return }
         guard kind != .meeting || meetingMode != .online || screenGranted else { statusDetail = "Allow Mac audio"; showSettings?(); return }
         let title = kind == .dictation ? "Dictation" : meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -579,8 +584,48 @@ final class AppModel: ObservableObject {
         _ = mutate(id) { $0.delivery = .cancelled; $0.status = .cancelled }; automaticDeliveryID = nil; setChip(.cancelled)
         if phase == .starting || phase == .recording { finishRecording() }
     }
-    private enum AppFailure: Error { case missingToken }
-    private func config() throws -> OpenAIConfig { try operations.credentials(connectionProvider) }
+    private enum AppFailure: Error {
+        case missingToken, lockedToken, rejectedToken
+        var kind: ServiceFailureKind {
+            switch self { case .missingToken: return .credentialMissing; case .lockedToken: return .credentialLocked; case .rejectedToken: return .invalidCredential }
+        }
+    }
+    private func credentialFailure(for provider: ConnectionProvider) -> AppFailure? {
+        let credential = credentialAccess.get(provider)
+        let available = credential?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let locked = credentialAccess.needsAccess(provider)
+        if provider == connectionProvider { hasKey = available; tokenAccessRequired = locked }
+        if (provider == connectionProvider ? keyStatus : providerStatuses[provider]) == .rejected { return .rejectedToken }
+        if !available { return locked ? .lockedToken : .missingToken }
+        return nil
+    }
+    @discardableResult private func ensureCredentials(for recordID: UUID? = nil) -> Bool {
+        guard keyStatus != .checking else { statusDetail = "Checking your " + connectionProvider.credentialLabel.lowercased() + "…"; return false }
+        guard let failure = credentialFailure(for: connectionProvider) else { return true }
+        var noticeRecord = SessionRecord(kind: .dictation, title: "")
+        noticeRecord.serviceProviderID = connectionProvider.rawValue
+        noticeRecord.transcriptionIssues = [.init(userMessage: "Credential required.", failureKind: failure.kind)]
+        if let recordID {
+            _ = mutate(recordID) { record in
+                record.serviceProviderID = connectionProvider.rawValue
+                record.transcriptionIssues.removeAll { $0.spanID == nil && $0.failureKind?.allowsRecoveryAfterRemedy == true }
+                record.transcriptionIssues.append(contentsOf: noticeRecord.transcriptionIssues)
+            }
+            statusDetail = ""
+        } else { statusDetail = serviceNotice(for: noticeRecord)?.message ?? "Check Settings" }
+        showSettings?()
+        return false
+    }
+    private func config(for provider: ConnectionProvider? = nil) throws -> OpenAIConfig {
+        let selected = provider ?? connectionProvider
+        if let failure = credentialFailure(for: selected) { throw failure }
+        let config = try operations.credentials(selected)
+        guard config.hasKey else { throw AppFailure.missingToken }
+        return config
+    }
+    private func failureKind(for error: Error) -> ServiceFailureKind {
+        (error as? AppFailure)?.kind ?? (error as? ProviderError)?.failureKind ?? .unavailable
+    }
     private func livePersistence(id: UUID, generation: UUID) -> LiveMeetingController.Persist {
         { [weak self] turns in
             guard let model = self else { throw CancellationError() }
@@ -625,7 +670,7 @@ final class AppModel: ObservableObject {
             _ = mutate(record.id) {
                 $0.status = .failed
                 $0.transcriptionIssues = [.init(userMessage: "Live transcript could not start.",
-                    failureKind: (error as? ProviderError)?.failureKind ?? .invalidCredential)]
+                    failureKind: failureKind(for: error))]
             }
             return false
         }
@@ -699,7 +744,7 @@ final class AppModel: ObservableObject {
                     $0.transcriptionIssues = $0.transcriptionIssues.filter { $0.spanID == nil && $0.failureKind != nil } + $0.liveMeetingIssues
                     if $0.transcriptionIssues.isEmpty {
                         $0.transcriptionIssues = [.init(userMessage: "Meeting transcript could not finish. Audio is saved.",
-                            failureKind: (error as? ProviderError)?.failureKind ?? .unavailable)]
+                            failureKind: self.failureKind(for: error))]
                     }
                 }
                 self.phase = .error; self.setChip(.failed)
@@ -774,7 +819,7 @@ final class AppModel: ObservableObject {
                     self.automaticDeliveryID = nil; self.phase = .done
                     self.setChip(.cancelled, dismissAfter: 12); return
                 }
-                let failure = (error as? ProviderError)?.failureKind ?? (error is AppFailure ? .invalidCredential : .unavailable)
+                let failure = self.failureKind(for: error)
                 _ = self.mutate(id) {
                     $0.status = $0.delivery == .cancelled ? .cancelled : .failed
                     $0.transcriptionIssues = [TranscriptionIssue(userMessage: "Transcription could not finish.", failureKind: failure)]
@@ -805,6 +850,8 @@ final class AppModel: ObservableObject {
     }
     func retry(_ id: UUID) {
         guard !isBusy, manualPasteTask == nil, let r = records.first(where: { $0.id == id }) else { return }
+        let needsService = r.canRecover && !(r.hasText && r.status == .cancelled && r.issues.isEmpty && r.liveMeetingVersion == nil)
+        if needsService, !ensureCredentials(for: id) { return }
         cancelledIDs.remove(id)
         automaticDeliveryID = nil; activeSessionID = id; activeKind = r.kind
         if r.liveMeetingVersion != nil {
@@ -834,7 +881,7 @@ final class AppModel: ObservableObject {
                 if self.formattingGeneration == generation { self.formattingRecordID = nil; self.formattingTask = nil }
             }
             do {
-                let credentials = try self.operations.credentials(provider)
+                let credentials = try self.config(for: provider)
                 let result = try await format(raw, credentials)
                 guard !Task.isCancelled, self.formattingGeneration == generation, self.formattingRecordID == id,
                       let current = self.records.first(where: { $0.id == id }),
@@ -848,7 +895,7 @@ final class AppModel: ObservableObject {
                       self.formattingRecordID == id, let current = self.records.first(where: { $0.id == id }),
                       current.rawTranscript == record.rawTranscript, current.transcript == record.transcript else { return }
                 _ = self.mutate(id) {
-                    $0.formattingFailure = (error as? ProviderError)?.failureKind ?? (error is AppFailure ? .invalidCredential : .unavailable)
+                    $0.formattingFailure = self.failureKind(for: error)
                     $0.serviceProviderID = provider.rawValue
                 }
             }
@@ -865,6 +912,12 @@ final class AppModel: ObservableObject {
         let retryAction: ServiceAction = formatting ? .retryFormatting : .retryTranscription
         let retryTitle = "Retry"
         switch failure {
+        case .credentialMissing:
+            return ServiceNotice(message: prefix + "Add your " + (provider == .openAI ? "OpenAI API key" : provider == .team ? "team token" : "credential") + " in Settings.", buttonTitle: "Settings", action: .settings)
+        case .credentialLocked:
+            return ServiceNotice(message: prefix + "Unlock your " + (provider == .openAI ? "OpenAI API key" : provider == .team ? "team token" : "credential") + " in Settings.", buttonTitle: "Unlock", action: .settings)
+        case .configuration:
+            return ServiceNotice(message: prefix + "The transcription service could not accept this request.", buttonTitle: "Settings", action: .settings)
         case .invalidCredential:
             return ServiceNotice(message: prefix + (provider == .team ? "Your team token was rejected." : provider == .openAI ? "Your API key was rejected." : "Your credential was rejected."), buttonTitle: "Check Settings", action: .settings)
         case .accessDenied:
@@ -877,7 +930,9 @@ final class AppModel: ObservableObject {
         case .rateLimited:
             return ServiceNotice(message: prefix + "Too many requests. Try again shortly.", buttonTitle: "Retry", action: retryAction)
         case .invalidHints:
-            return ServiceNotice(message: "Review your language and dictionary settings.", buttonTitle: "Settings", action: .settings)
+            return ServiceNotice(message: record.liveMeetingVersion != nil
+                ? "The transcription service could not accept this request."
+                : "Review your language and dictionary settings.", buttonTitle: "Settings", action: .settings)
         case .tooLarge:
             return ServiceNotice(message: "This recording could not be uploaded. Your audio is saved.", buttonTitle: "", action: nil)
         case .unavailable, .invalidResponse, .storage:

@@ -127,8 +127,9 @@ private final class Fixture {
     var levelCallback: (@Sendable (Source, Double) -> Void)?
 
     init(legacyCredential: CredentialSession.ReadResult = .missing, storedProvider: ConnectionProvider? = nil,
-         existingConsent: Bool = false, liveMeetingEnabled: Bool = false) throws {
-        credentialVault = CredentialVault(read: { provider, _ in provider == .team ? legacyCredential : .value("local-test-direct") },
+         existingConsent: Bool = false, liveMeetingEnabled: Bool = false,
+         directCredential: CredentialSession.ReadResult = .value("local-test-direct")) throws {
+        credentialVault = CredentialVault(read: { provider, _ in provider == .team ? legacyCredential : directCredential },
                                           write: { _, _ in })
         let vault = credentialVault
         credentialAccess = CredentialAccess(get: { vault.get($0) }, unlock: { vault.unlock($0) },
@@ -586,6 +587,61 @@ struct CoordinatorSelftest {
                 ProviderProbeProtocol.finish(status: 200); _ = await saving.value
                 try check(f.model.connectionProvider == .team && f.model.keyStatus == .idle && !f.model.hasKey,
                           "Late direct verification must not verify or populate the Team account")
+            }),
+            ("Missing locked and rejected selected credentials refuse capture with provider-specific guidance", { _ in
+                let cases: [(ConnectionProvider, CredentialSession.ReadResult, String, Bool)] = [
+                    (.team, .missing, "Add your team token in Settings.", false),
+                    (.openAI, .missing, "Add your OpenAI API key in Settings.", false),
+                    (.team, .blocked(errSecInteractionNotAllowed), "Unlock your team token in Settings.", true),
+                    (.openAI, .blocked(errSecInteractionNotAllowed), "Unlock your OpenAI API key in Settings.", true)
+                ]
+                for (provider, credential, message, locked) in cases {
+                    let f = try Fixture(legacyCredential: credential, storedProvider: provider, directCredential: credential)
+                    var settings = 0; f.model.showSettings = { settings += 1 }
+                    // An old hasKey snapshot must not bypass the actual selected account read.
+                    f.model.hasKey = true; f.model.startDictation(); f.model.startMeeting()
+                    try check(f.model.statusDetail == message && settings == 2 && f.starts == 0 && f.model.records.isEmpty &&
+                              !f.model.hasKey && f.model.tokenAccessRequired == locked,
+                              "Credential preflight identifies selected account before saving/capture")
+                    await f.close()
+                }
+                let f = try Fixture(storedProvider: .team, directCredential: .missing)
+                try f.credentialVault.set("local-rejected-team", for: .team)
+                f.model.keyStatus = .rejected; f.model.startDictation()
+                try check(f.model.statusDetail == "Your team token was rejected." && f.starts == 0 && f.model.records.isEmpty,
+                          "Known rejection must not be relabeled as missing")
+                await f.close()
+            }),
+            ("Saved-audio retry retains missing credential remedy and succeeds only after selected-account repair", { _ in
+                let f = try Fixture(storedProvider: .team)
+                let id = try f.addHistoricalRecord(status: .failed)
+                let original = f.model.records.first { $0.id == id }!
+                f.model.retry(id)
+                let blocked = try f.store.load().first { $0.id == id }!
+                try check(blocked.tracks == original.tracks && blocked.status == original.status && blocked.canRecover &&
+                          blocked.transcriptionIssues.first?.failureKind == .credentialMissing && blocked.serviceProviderID == "team" &&
+                          f.model.serviceNotice(for: blocked)?.message == "Add your team token in Settings." && f.transcriptionRequests == 0,
+                          "Missing account never discards captured audio or implies dictionary failure")
+                try f.credentialVault.set("local-repaired-team", for: .team)
+                f.model.retry(id); try await until("credential repaired ASR retry") { f.processing.entered }
+                f.processing.release(); try await until("credential repaired historical completion") { f.model.phase == .done }
+                try check(f.transcriptionRequests == 1 && f.seenProvider == .team && f.insertions == 0 &&
+                          f.model.records.first { $0.id == id }?.transcriptionIssues.isEmpty == true,
+                          "Explicit saved-audio retry uses repaired selected credential without automatic paste")
+                await f.close()
+            }),
+            ("Remote configuration failures never blame local dictionary hints", { f in
+                var record = SessionRecord(kind: .meeting, title: "Configuration fixture")
+                record.liveMeetingVersion = 1; record.serviceProviderID = "team"
+                for category in [ServiceFailureKind.configuration, .invalidHints] {
+                    record.transcriptionIssues = [.init(userMessage: "Safe fixture", failureKind: category)]
+                    let notice = f.model.serviceNotice(for: record)
+                    try check(notice?.message == "The transcription service could not accept this request." && notice?.action == .settings,
+                              "Remote and historical live configuration failure uses neutral setup advice")
+                }
+                record.liveMeetingVersion = nil
+                try check(f.model.serviceNotice(for: record)?.message == "Review your language and dictionary settings.",
+                          "Actual local hint validation keeps its precise remedy")
             }),
             ("Checking or rejected tokens cannot begin capture", { f in
                 f.model.keyStatus = .checking; f.model.startDictation()

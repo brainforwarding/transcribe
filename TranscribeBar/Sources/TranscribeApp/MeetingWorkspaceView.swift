@@ -63,28 +63,9 @@ struct MeetingWorkspaceView: View {
                         HStack { Text("Transcript").font(DesignSystem.font(20, weight: .bold)); StatusPill(title: record.liveMeetingVersion == nil ? "Preview" : "Live") }
                         if record.liveMeetingVersion != nil {
                             if let notice = model.serviceNotice(for: record) { Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 16) {
-                                    ForEach(record.segments, id: \.turnID) { segment in
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(duration(segment.start) + " · " + segment.label).font(DesignSystem.font(12, weight: .semibold)).foregroundStyle(DesignSystem.muted).help(segment.timing == .audioInterval ? "Approximate passage time" : "Passage time")
-                                            Text(segment.text).textSelection(.enabled)
-                                        }
-                                    }
-                                    ForEach(model.meetingDrafts.values.sorted(by: { $0.source != $1.source ? $0.source < $1.source : $0.itemID < $1.itemID }), id: \.id) { draft in
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text((draft.source == .system ? "System audio" : record.meetingMode == .inPerson ? "Microphone" : "You") + " · Draft")
-                                                .font(DesignSystem.font(12, weight: .semibold))
-                                            Text(draft.text)
-                                        }.foregroundStyle(DesignSystem.muted)
-                                    }
-                                    if record.segments.isEmpty && model.meetingDrafts.isEmpty {
-                                        Text("Your transcript will appear here.").foregroundStyle(DesignSystem.muted)
-                                    }
-                                }.font(DesignSystem.font(15)).frame(maxWidth: .infinity, alignment: .leading)
-                            }
+                            LiveMeetingTranscriptView(record: record, drafts: sortedDrafts).id(record.id)
                         } else {
-                            ScrollView { Text(record.preview.isEmpty ? "Your transcript will appear here." : record.preview).font(DesignSystem.font(15)).foregroundStyle(DesignSystem.muted).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                            LiveMeetingTranscriptView(record: record, drafts: []).id(record.id)
                         }
                     }.frame(width: 360, alignment: .topLeading)
                 }.frame(maxHeight: .infinity)
@@ -100,7 +81,7 @@ struct MeetingWorkspaceView: View {
                         }
                     }
                 }
-                if !record.issues.isEmpty { RecordIssuesView(record: record) }
+                if record.liveMeetingVersion == nil, !record.issues.isEmpty { RecordIssuesView(record: record) }
                 Picker("Meeting content", selection: $tab) { ForEach(ReviewTab.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 372)
                 switch tab {
                 case .notes: EditableTextArea(text: notes, placeholder: "Your personal notes…").accessibilityLabel("My meeting notes")
@@ -117,6 +98,9 @@ struct MeetingWorkspaceView: View {
                     ScrollView { Text(record.summaryNotesSnapshot).foregroundStyle(DesignSystem.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                 }.padding(24).frame(width: 600, height: 420).font(DesignSystem.font()).background(DesignSystem.surface).preferredColorScheme(model.colorScheme)
             }
+    }
+    private var sortedDrafts: [LiveMeetingDraft] {
+        model.meetingDrafts.values.sorted { $0.source != $1.source ? $0.source < $1.source : $0.itemID < $1.itemID }
     }
     private var sourceControls: some View {
         HStack(spacing: 16) {
@@ -190,6 +174,59 @@ struct MeetingWorkspaceView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.onAppear { if let id = focusedTurnID { proxy.scrollTo(id, anchor: .top) } }
                 .onChange(of: focusedTurnID) { id in if let id { proxy.scrollTo(id, anchor: .top) } }
+        }
+    }
+}
+
+/// Following exists only in the capture pane. Notes and finished review keep
+/// their own ordinary scroll position, including summary-source navigation.
+private struct LiveMeetingTranscriptView: View {
+    let record: SessionRecord
+    let drafts: [LiveMeetingDraft]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @StateObject private var follower = LiveTranscriptFollower()
+    private let bottomID = "live-transcript-bottom"
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if record.liveMeetingVersion == nil {
+                        Text(record.preview.isEmpty ? "Your transcript will appear here." : record.preview)
+                            .foregroundStyle(DesignSystem.muted).textSelection(.enabled)
+                    } else {
+                        ForEach(record.segments, id: \.turnID) { segment in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(duration(segment.start) + " · " + segment.label)
+                                    .font(DesignSystem.font(12, weight: .semibold)).foregroundStyle(DesignSystem.muted)
+                                    .help(segment.timing == .audioInterval ? "Approximate passage time" : "Passage time")
+                                Text(segment.text).textSelection(.enabled)
+                            }
+                        }
+                        ForEach(drafts, id: \.id) { draft in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text((draft.source == .system ? "System audio" : record.meetingMode == .inPerson ? "Microphone" : "You") + " · Draft")
+                                    .font(DesignSystem.font(12, weight: .semibold))
+                                Text(draft.text)
+                            }.foregroundStyle(DesignSystem.muted)
+                        }
+                        if record.segments.isEmpty && drafts.isEmpty {
+                            Text("Your transcript will appear here.").foregroundStyle(DesignSystem.muted)
+                        }
+                    }
+                    Color.clear.frame(height: 1).id(bottomID)
+                }.font(DesignSystem.font(15)).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(LiveTranscriptScrollProbe(follower: follower))
+            }
+            .onAppear { follower.contentChanged() }
+            .onChange(of: record.transcriptRevision) { _ in follower.contentChanged() }
+            .onChange(of: drafts) { _ in follower.contentChanged() }
+            .onChange(of: record.preview) { _ in follower.contentChanged() }
+            .onChange(of: follower.scrollPulse) { _ in
+                if reduceMotion { proxy.scrollTo(bottomID, anchor: .bottom) }
+                else { withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(bottomID, anchor: .bottom) } }
+            }
+            .onDisappear { follower.stop() }
         }
     }
 }

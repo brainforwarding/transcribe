@@ -47,7 +47,7 @@ public struct OpenAIConfig: Sendable {
 
 /// Errors never contain response bodies, credentials, provider URLs, or transcript text.
 public enum ProviderError: Error, LocalizedError, Sendable, Equatable {
-    case authentication, accessDenied, insufficientCredits, billingLimit, quota, tooLarge, unavailable, invalidResponse, invalidHints, cancelled, cacheWrite
+    case authentication, accessDenied, insufficientCredits, billingLimit, quota, tooLarge, unavailable, invalidResponse, invalidHints, configuration, cancelled, cacheWrite
     case rejected(Int)
     public var errorDescription: String? {
         switch self {
@@ -59,6 +59,7 @@ public enum ProviderError: Error, LocalizedError, Sendable, Equatable {
         case .tooLarge: return "The audio part exceeds the service upload limit."
         case .unavailable: return "The transcription service is unavailable. Your recording is kept."
         case .invalidResponse: return "The service returned an unreadable transcript. Try again."
+        case .configuration: return "The transcription service could not accept this request. Check Settings."
         case .invalidHints: return "A language or dictionary hint is invalid. Review Settings."
         case .cancelled: return "Transcription was cancelled. Your recording is kept."
         case .cacheWrite: return "The transcript could not be saved. Your recording is kept."
@@ -66,7 +67,7 @@ public enum ProviderError: Error, LocalizedError, Sendable, Equatable {
         }
     }
     public var retryable: Bool {
-        switch self { case .authentication, .accessDenied, .invalidHints, .tooLarge: return false; default: return true }
+        switch self { case .authentication, .accessDenied, .invalidHints, .configuration, .tooLarge: return false; default: return true }
     }
 }
 
