@@ -27,11 +27,14 @@ with tempfile.TemporaryDirectory(prefix='transcribe-secrets-selftest-') as tempo
 import json,os,pathlib,sys
 root=pathlib.Path(__file__).resolve().parent.parent
 if os.environ.get('FIXTURE_DENY')=='yes': sys.exit(1)
-if sys.argv[1]=='read': sys.stdout.write((root/'canonical.seed').read_text())
+if sys.argv[1]=='read':
+    expected='op://'+'b'*26+'/'+'a'*26+'/credential'
+    if sys.argv[2]!=expected: sys.exit(1)
+    sys.stdout.write((root/'canonical.seed').read_text())
 elif sys.argv[1:3]==['item','list']: print(json.dumps([{'title':'Transcribe — Update signing'}] if (root/'canonical.seed').exists() else []))
 elif sys.argv[1:3]==['item','create']:
     payload=json.load(sys.stdin); value=next(f['value'] for f in payload['fields'] if f['id']=='credential')
-    (root/'canonical.seed').write_text(value+'\\n'); print('{}')
+    (root/'canonical.seed').write_text(value+'\\n'); print(json.dumps({'id':'a'*26,'vault':{'id':'b'*26}}))
 else: sys.exit(1)
 '''); op.chmod(0o700)
     environment=dict(os.environ,PATH=str(fake)+os.pathsep+os.environ['PATH'])
@@ -44,6 +47,7 @@ else: sys.exit(1)
     run('status'); passed+=1
     private=root/'export'; private.mkdir(mode=0o700); export=private/'seed'; export.write_text(seed); export.chmod(0o600)
     run('canonicalize-new-updater',str(export)); passed+=1
+    assert json.loads((root/'.dev-secrets/updater-signing.json').read_text())['reference']=='op://'+'b'*26+'/'+'a'*26+'/credential'; passed+=1
     target=root/'TranscribeBar/.secrets/updater-signing.seed'
     assert target.read_text()==seed and target.stat().st_mode&0o777==0o600; passed+=1
     run('status'); passed+=1

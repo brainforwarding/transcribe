@@ -29,7 +29,7 @@ final class AppModel: ObservableObject {
         guard let identifier = Bundle.main.bundleIdentifier,
               identifier.hasPrefix("com.sebastianmarambio.transcribe.updatefixture."),
               let path = Bundle.main.infoDictionary?["TranscribeValidationRoot"] as? String,
-              path.hasPrefix("/"), let preferences = UserDefaults(suiteName: identifier)
+              path.hasPrefix("/"), let preferences = UserDefaults(suiteName: identifier + ".validation")
         else { throw ProviderError.invalidResponse }
         let root = URL(fileURLWithPath: path).standardizedFileURL
         let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path + "/"
