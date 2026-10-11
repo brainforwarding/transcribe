@@ -12,6 +12,7 @@ RECEIPTS="$ROOT/build/notarization-results"
 SIGNATURE="$(codesign -dv --verbose=4 "$APP" 2>&1)"
 grep -q 'Authority=Developer ID Application:' <<< "$SIGNATURE" || { echo "Developer ID signature required" >&2; exit 1; }
 grep -q 'flags=.*runtime' <<< "$SIGNATURE" || { echo "Hardened Runtime required" >&2; exit 1; }
+IDENTITY="$(sed -n 's/^Authority=//p' <<< "$SIGNATURE" | head -n 1)"
 "$ROOT/scripts/verify-app.sh" "$APP" --launch
 
 STAGE="$(mktemp -d "$ROOT/build/notarize.XXXXXX")"
@@ -44,6 +45,8 @@ mkdir "$STAGE/image"
 ditto "$APP" "$STAGE/image/Transcribe.app"
 ln -s /Applications "$STAGE/image/Applications"
 hdiutil create -volname "Transcribe" -srcfolder "$STAGE/image" -ov -format UDZO "$DMG"
+codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+codesign --verify --strict --verbose=2 "$DMG"
 submit_artifact dmg "$DMG"
 xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
