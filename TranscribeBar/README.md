@@ -8,7 +8,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0.8 adds subtle successful Copy feedback, simpler dictation actions, a sidebar version and a clearer Quit button to the day-grouped history and actionable service recovery. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. The local 2.0.8 app and signed installer are notarized and stapled; strict signatures, Gatekeeper and mounted-app startup checks pass. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
+Version 2.0.8 adds subtle successful Copy feedback, simpler dictation actions, a sidebar version and a clearer Quit button to the day-grouped history and actionable service recovery. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. The local 2.0.8 app and signed installer are notarized and stapled; strict signatures, Gatekeeper and mounted-app startup checks pass. Live direct-OpenAI workflows still need validation with an authorized user's key. Use the versioned download link above for this installer.
 
 ```bash
 cd TranscribeBar
@@ -27,7 +27,7 @@ If you already have a personal token for this app's shared proxy, choose **Team*
 
 Allow Microphone for recording and Accessibility for double Option and cursor insertion. Online meetings additionally need Screen & System Audio Recording. macOS may require quitting and reopening after granting that permission. In-person meetings and dictation only use the microphone.
 
-Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac. Let participants know before recording.
+Audio and text needed for transcription, dictation formatting and meeting notes are sent to OpenAI. Recordings and history are stored on this Mac. Let participants know before recording.
 
 ## Dictation
 
@@ -86,4 +86,4 @@ The checks use Command Line Tools without XCTest or network credentials. A local
 
 For public distribution, follow [the implementation state](../docs/IMPLEMENTATION.md) and [release instructions](../FINISH.md). The release script notarizes and staples the app before creating and signing the installer, then notarizes/staples the DMG and verifies its contained app. Publish the Mac version through its explicit release URL and verify the downloaded artifact.
 
-The Python CLI and Windows app remain separate entry points.
+The Python command-line recorder is a separate entry point.
