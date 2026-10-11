@@ -1,8 +1,12 @@
 # Transcribe
 
+<img src="docs/assets/transcribe-card.jpg" alt="Transcribe: speak where you work, remember what was discussed. A live meeting transcript beside your notes, and the dictation chip recording." width="100%">
+
 A Mac app that turns speech into text. Use it to dictate into any app, or to record a meeting and get a transcript and notes.
 
 **[Download Transcribe 2.0.10 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.10/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
+
+https://github.com/user-attachments/assets/d4a4af78-cfd9-4e01-9ce1-a4d9795d30bd
 
 ## Dictation
 
