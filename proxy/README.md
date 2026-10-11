@@ -48,12 +48,13 @@ replaced without the owner's explicit authorization.
 
 ## What the Worker enforces
 
-- Exactly two endpoints (`/v1/audio/transcriptions`, `/v1/chat/completions`); everything else 403.
+- POST file transcription (`/v1/audio/transcriptions`) and chat (`/v1/chat/completions`), plus GET transcription-only WebSocket upgrades (`/v1/realtime?intent=transcription`). Other POST endpoints are denied; unsupported methods return 405.
 - All inbound headers stripped; the org key is injected server-side only.
 - Chat models allowlisted (`gpt-4o`, `gpt-4o-mini`, `gpt-6-luna`); 25 MiB body cap.
   Native dictation uses Luna with `reasoning_effort: none` for its punctuation and
   paragraph pass. Meeting summaries retain their existing models.
-- Per-person hourly rate limit (`RATE_PER_HOUR`, default 120) keyed by the token owner.
+- Per-person hourly rate limit (`RATE_PER_HOUR`, default 120) keyed by the token owner. Each live source connection counts toward this best-effort KV limit.
+- Live sessions accept only 24 kHz PCM and `gpt-live-transcribe` transcription settings, audio appends, commits and clears. Assistant responses and tools are rejected. Connection lifetime, frame size/rate and unacknowledged audio are bounded. Unknown errors are sanitized; known account errors retain safe codes for user remedies.
 - Constant-time token comparison; audio bodies are streamed, never read or logged; errors
   are sanitized — neither the key nor tokens are ever echoed.
 
