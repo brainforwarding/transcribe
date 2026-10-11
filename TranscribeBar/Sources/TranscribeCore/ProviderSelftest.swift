@@ -1,6 +1,7 @@
 // Network-free provider, recovery and timeline checks for command-line-only Swift installs.
 import Foundation
 import AVFoundation
+import CryptoKit
 
 private final class StubProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
@@ -59,6 +60,7 @@ private final class TranscriptionTests {
             XCTAssertTrue(text.contains("name=\"keywords[]\""))
             XCTAssertFalse(text.contains("name=\"language\""))
             XCTAssertFalse(text.contains("timestamp_granularities"))
+            XCTAssertFalse(text.contains("name=\"prompt\""))
             return (200, Data(#"{"text":"Hello"}"#.utf8))
         }
         let result = try await requestAudioTranscript(fileURL: audio, model: .text,
@@ -73,10 +75,11 @@ private final class TranscriptionTests {
             XCTAssertTrue(text.contains("gpt-4o-transcribe-diarize"))
             XCTAssertTrue(text.contains("diarized_json")); XCTAssertTrue(text.contains("chunking_strategy"))
             XCTAssertFalse(text.contains("keywords[]")); XCTAssertFalse(text.contains("languages[]"))
+            XCTAssertFalse(text.contains("name=\"prompt\""))
             return (200, Data(#"{"text":"Hello","segments":[{"start":0.25,"end":0.75,"text":"Hello","speaker":"A"}]}"#.utf8))
         }
         let result = try await requestAudioTranscript(fileURL: audio, model: .diarized,
-            languages: ["en", "es"], keywords: ["Aanu"], config: config, session: transport)
+            languages: ["en", "es"], keywords: ["Aanu"], prompt: "Never send to diarization.", config: config, session: transport)
         XCTAssertEqual(result.segments.first?.start, 0.25)
         XCTAssertEqual(result.segments.first?.end, 0.75)
     }
@@ -101,6 +104,107 @@ private final class TranscriptionTests {
         }
         XCTAssertEqual(count, 1)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: cache, includingPropertiesForKeys: nil).count, 1)
+    }
+    func testFinalDictationSendsFixedPolicyAndPreservesParagraphs() async throws {
+        let source = try wav(name: "dictation.wav", value: 0.2, seconds: 0.5)
+        let formatted = "Tomás dijo: \"Quiero ir a comer\".\n\nNo estoy seguro."
+        let cases: [([String], String)] = [([], "Style context"), (["en"], "Style context"),
+            (["es"], "Contexto de estilo para este dictado"), (["es-CL"], "Contexto de estilo para este dictado"),
+            (["pt"], "Contexto de estilo para este ditado"), (["pt-BR"], "Contexto de estilo para este ditado"),
+            (["es", "en"], "Style context")]
+        var requests = 0
+        for (index, value) in cases.enumerated() {
+            StubProtocol.handler = { request in
+                requests += 1
+                let multipart = self.body(request)
+                XCTAssertTrue(multipart.contains("name=\"prompt\""))
+                XCTAssertTrue(multipart.contains(value.1))
+                XCTAssertTrue(multipart.contains("Tomás"))
+                XCTAssertTrue(multipart.contains("gpt-transcribe"))
+                return (200, try JSONSerialization.data(withJSONObject: ["text": formatted]))
+            }
+            let result = try await transcribeFinal(tracks: [SessionAudioTrack(source: .mic,
+                spans: [AudioSpan(url: source, offset: 0, duration: 0.5)])], kind: .dictation,
+                chunkDir: folder.appendingPathComponent("final-\(index)"), languages: value.0,
+                keywords: ["Tomás"], config: config, session: transport)
+            XCTAssertTrue(result.complete); XCTAssertTrue(result.segments.isEmpty)
+            XCTAssertEqual(result.text, formatted)
+        }
+        XCTAssertEqual(requests, cases.count)
+    }
+    func testPreviewAndLegacyRequestsRemainUnprompted() async throws {
+        let source = try wav(name: "preview.wav", value: 0.2, seconds: 0.5)
+        var count = 0
+        StubProtocol.handler = { request in
+            count += 1
+            let multipart = self.body(request)
+            XCTAssertFalse(multipart.contains("name=\"prompt\""))
+            if count == 1 {
+                XCTAssertTrue(multipart.contains("gpt-transcribe"))
+                return (200, Data(#"{"text":"Preview unchanged"}"#.utf8))
+            }
+            XCTAssertTrue(multipart.contains("whisper-1")); XCTAssertTrue(multipart.contains("verbose_json"))
+            return (200, Data(#"{"text":"Legacy unchanged","segments":[{"start":0,"end":0.5,"text":"Legacy unchanged"}]}"#.utf8))
+        }
+        let preview = try await transcribePreview(window: PreviewWindow(url: source, offset: 0, duration: 0.5),
+            languages: ["es"], config: config, session: transport)
+        XCTAssertEqual(preview, "Preview unchanged")
+        let legacy = try await requestAudioTranscript(fileURL: source, model: .legacy,
+            prompt: "Ignored for Whisper.", config: config, session: transport)
+        XCTAssertEqual(legacy.text, "Legacy unchanged"); XCTAssertEqual(count, 2)
+    }
+    func testPromptCacheSeparatesPoliciesAndReadsHistoricalUnpromptedEntry() async throws {
+        let source = try audio(), cache = folder.appendingPathComponent("prompt-cache")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        // Seed the historical key directly, proving nil keeps its old byte identity.
+        var digest = SHA256()
+        digest.update(data: Data(try audioDigest(source).utf8))
+        digest.update(data: try JSONEncoder().encode(["gpt-transcribe", "--keywords--"]))
+        let oldKey = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        try JSONEncoder().encode(AudioTranscriptResponse(text: "Old unprompted result"))
+            .write(to: cache.appendingPathComponent(oldKey + ".json"), options: .atomic)
+        var requests = 0
+        StubProtocol.handler = { request in
+            requests += 1
+            XCTAssertTrue(self.body(request).contains("name=\"prompt\""))
+            return (200, try JSONSerialization.data(withJSONObject: ["text": "Formatted result \(requests)"]))
+        }
+        let old = try await cachedAudioTranscript(fileURL: source, model: .text, languages: [], keywords: [],
+            cacheDir: cache, config: config, session: transport)
+        XCTAssertEqual(old.text, "Old unprompted result"); XCTAssertEqual(requests, 0)
+        for prompt in ["Policy A", "Policy A", "Policy B"] {
+            _ = try await cachedAudioTranscript(fileURL: source, model: .text, languages: [], keywords: [],
+                cacheDir: cache, prompt: prompt, config: config, session: transport)
+        }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: cache, includingPropertiesForKeys: nil).count, 3)
+    }
+    func testIgnoredDiarizationPromptDoesNotChangeCacheIdentity() async throws {
+        let source = try audio(), cache = folder.appendingPathComponent("diarization-cache")
+        var requests = 0
+        StubProtocol.handler = { request in
+            requests += 1
+            XCTAssertFalse(self.body(request).contains("name=\"prompt\""))
+            return (200, Data(#"{"text":"Meeting","segments":[{"start":0,"end":0.5,"text":"Meeting","speaker":"A"}]}"#.utf8))
+        }
+        for prompt: String? in ["Ignored A", "Ignored B", nil] {
+            _ = try await cachedAudioTranscript(fileURL: source, model: .diarized, languages: [], keywords: [],
+                cacheDir: cache, prompt: prompt, config: config, session: transport)
+        }
+        XCTAssertEqual(requests, 1)
+    }
+    func testCancelledPromptedRequestNeverUploadsOrCreatesCache() async throws {
+        let source = try audio(), cache = folder.appendingPathComponent("cancelled-cache")
+        var requests = 0
+        StubProtocol.handler = { _ in requests += 1; return (200, Data(#"{"text":"Must not be saved"}"#.utf8)) }
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await cachedAudioTranscript(fileURL: source, model: .text, languages: [], keywords: [],
+                cacheDir: cache, prompt: DictationFormatting.english, config: config, session: transport)
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError { }
+        XCTAssertEqual(requests, 0); XCTAssertFalse(FileManager.default.fileExists(atPath: cache.path))
     }
     func testProviderErrorsDoNotEchoResponseContent() async throws {
         StubProtocol.handler = { _ in (401, Data("NEVER_ECHO_THIS_PROVIDER_BODY".utf8)) }
@@ -296,6 +400,11 @@ public func runTranscriptionSelftests() async -> Bool {
         ("diarization format", tests.testDiarizationUsesSupportedFieldsAndRealTimes),
         ("dictionary validation", tests.testInvalidDictionaryHintIsRejectedBeforeHTTP),
         ("durable response cache", tests.testSuccessfulRecognitionIsCachedBeforeAnotherRequest),
+        ("final dictation policy and paragraphs", tests.testFinalDictationSendsFixedPolicyAndPreservesParagraphs),
+        ("preview and legacy remain unprompted", tests.testPreviewAndLegacyRequestsRemainUnprompted),
+        ("prompt cache identity and historical compatibility", tests.testPromptCacheSeparatesPoliciesAndReadsHistoricalUnpromptedEntry),
+        ("ignored diarization prompt cache", tests.testIgnoredDiarizationPromptDoesNotChangeCacheIdentity),
+        ("prompted cancellation safety", tests.testCancelledPromptedRequestNeverUploadsOrCreatesCache),
         ("sanitized errors", tests.testProviderErrorsDoNotEchoResponseContent),
         ("failure vs silence", tests.testFailedUploadIsNotReportedAsSilenceOrComplete),
         ("gap alignment", { try tests.testAlignedAudioPreservesGapAndBothSourceOffsets() }),

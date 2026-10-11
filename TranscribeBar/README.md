@@ -34,7 +34,7 @@ Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac
 - Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.
 - Option–Shift–V pastes the last dictation at the current editable cursor. Disable this shortcut in Settings if needed. The menu and history also provide copy actions.
 
-Dictation uses `gpt-transcribe`. Dictionary terms are optional recognition hints.
+Dictation uses `gpt-transcribe`. Its final transcription request includes a conservative formatting prompt for punctuation, paragraphs and quotation marks around clear direct speech. It preserves the spoken wording, languages, tone, names, numbers, negations and uncertainty; it does not summarize or answer dictated instructions. Formatting is model guidance and may vary. Dictionary terms remain optional recognition hints. Meetings, previews and legacy Whisper transcription do not use this dictation policy.
 
 ## Meetings
 

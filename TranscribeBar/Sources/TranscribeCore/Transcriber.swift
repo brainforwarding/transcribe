@@ -104,6 +104,7 @@ private func checkedHints(languages: [String], keywords: [String]) throws {
 
 public func requestAudioTranscript(fileURL: URL, model: AudioTranscriptionModel,
                                    languages: [String] = [], keywords: [String] = [],
+                                   prompt: String? = nil,
                                    config: OpenAIConfig, session: URLSession = .shared) async throws -> AudioTranscriptResponse {
     try checkedHints(languages: languages, keywords: keywords)
     try Task.checkCancellation()
@@ -128,6 +129,7 @@ public func requestAudioTranscript(fileURL: URL, model: AudioTranscriptionModel,
         field("response_format", "json")
         for language in languages { field("languages[]", language) }
         for keyword in keywords { field("keywords[]", keyword) }
+        if let prompt { field("prompt", prompt) }
     case .diarized:
         field("response_format", "diarized_json")
         field("chunking_strategy", "auto")
@@ -178,19 +180,26 @@ func providerData(_ request: URLRequest, session: URLSession) async throws -> Da
 /// Disk cache identity includes audio bytes and all recognition configuration, never auth.
 public func cachedAudioTranscript(fileURL: URL, model: AudioTranscriptionModel,
                                   languages: [String], keywords: [String], cacheDir: URL,
+                                  prompt: String? = nil,
                                   config: OpenAIConfig, session: URLSession = .shared,
                                   audioIdentity: String? = nil, maximumDuration: Double? = nil) async throws -> AudioTranscriptResponse {
     try checkedHints(languages: languages, keywords: keywords)
     let identity = try audioIdentity ?? audioDigest(fileURL)
     let options = try JSONEncoder().encode([model.rawValue] + languages + ["--keywords--"] + keywords)
     var hash = SHA256(); hash.update(data: Data(identity.utf8)); hash.update(data: options)
+    let effectivePrompt = model == .text ? prompt : nil
+    if let effectivePrompt {
+        // Keep historical unprompted keys byte-for-byte compatible. A separate
+        // encoded identity also prevents keyword arrays colliding with prompt data.
+        hash.update(data: try JSONEncoder().encode(["audio-transcription-prompt-v1", effectivePrompt]))
+    }
     let key = hash.finalize().map { String(format: "%02x", $0) }.joined()
     let path = cacheDir.appendingPathComponent(key + ".json")
     if let data = try? Data(contentsOf: path), let value = try? JSONDecoder().decode(AudioTranscriptResponse.self, from: data) {
         return value
     }
     let value = try await requestAudioTranscript(fileURL: fileURL, model: model, languages: languages,
-                                               keywords: keywords, config: config, session: session)
+                                               keywords: keywords, prompt: effectivePrompt, config: config, session: session)
     if let maximumDuration, value.segments.contains(where: { $0.end > maximumDuration + 1 }) {
         throw ProviderError.invalidResponse
     }
