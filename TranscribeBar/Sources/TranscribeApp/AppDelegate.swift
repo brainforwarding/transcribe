@@ -36,7 +36,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.showLibrary = { [weak self] in self?.openLibrary() }
         model.showSettings = { [weak self] in self?.openSettings() }
         model.retryShortcuts = { [weak self] in self?.shortcuts.start() }
-        shortcuts.onToggleDictation = { [weak self] in self?.model.toggleDictation() }
+        shortcuts.dictationContext = { [weak self] in
+            guard let self else { return .disabled }
+            if self.model.activeKind == .dictation,
+               self.model.phase == .starting || self.model.phase == .recording,
+               let id = self.model.activeSessionID { return .capturing(id) }
+            return self.model.isBusy ? .disabled : .idle
+        }
+        shortcuts.onStartDictation = { [weak self] in self?.model.startDictation() }
+        shortcuts.onStopDictation = { [weak self] id in
+            guard let self, self.model.activeSessionID == id,
+                  self.model.activeKind == .dictation,
+                  self.model.phase == .starting || self.model.phase == .recording else { return }
+            self.model.finishRecording()
+        }
         shortcuts.onCancel = { [weak self] in
             guard let self else { return }
             if self.model.activeKind == .meeting { self.model.chipVisible = false }
@@ -84,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let dictation = menu.item(withTag: 1) else { return }
         if model.activeKind == .dictation, model.isBusy {
             let canFinish = model.phase == .recording || model.phase == .starting
-            dictation.title = canFinish ? "Finish dictation    ⌥ ⌥" : "Transcribing…"
+            dictation.title = canFinish ? "Finish dictation    ⌥" : "Transcribing…"
             dictation.isEnabled = canFinish
         } else {
             dictation.title = "Start dictation    ⌥ ⌥"

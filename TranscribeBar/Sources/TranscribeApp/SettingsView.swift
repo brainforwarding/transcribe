@@ -9,7 +9,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("Settings").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
-                preference("Start / finish") { StatusPill(title: "⌥ ⌥"); Text("Double-tap Option").foregroundStyle(DesignSystem.muted) }
+                preference("Start / finish") { StatusPill(title: "⌥ ⌥ / ⌥"); Text("Double to start · Single to finish").foregroundStyle(DesignSystem.muted) }
                 preference("Paste last") { StatusPill(title: "⌥ ⇧ V"); Toggle("Enable shortcut", isOn: $model.pasteLastShortcutEnabled).toggleStyle(.switch) }
                 preference("Transcription quality") { Text("Highest accuracy").font(DesignSystem.font(15, weight: .semibold)) }
                 preference("Language") {
@@ -21,6 +21,9 @@ struct SettingsView: View {
                 Divider().overlay(DesignSystem.border)
                 preference(Config.proxyBaseURL == nil ? "OpenAI key" : "Team token") {
                     KeyStatusLabel(); Spacer(minLength: 8)
+                    if model.tokenAccessRequired {
+                        Button("Unlock") { model.unlockToken() }.buttonStyle(CirclesButtonStyle()).disabled(model.isBusy)
+                    }
                     Button(replacingKey ? "Cancel" : model.hasKey ? "Replace" : "Add") { replacingKey.toggle(); model.keyStatus = .idle }.buttonStyle(CirclesButtonStyle())
                 }
                 if replacingKey { KeyField(onSaved: { replacingKey = false }) }
@@ -78,7 +81,7 @@ struct KeyStatusLabel: View {
         case .verified: return "Connected"
         case .rejected: return "Token not accepted"
         case .savedUnverified: return "Saved · check connection"
-        case .idle: return model.hasKey ? "Saved in Keychain" : "Not connected"
+        case .idle: return model.tokenAccessRequired ? "Unlock Keychain" : model.hasKey ? "Saved in Keychain" : "Not connected"
         }
     }
 }
@@ -93,7 +96,14 @@ struct KeyField: View {
             SecureField(Config.proxyBaseURL == nil ? "OpenAI API key" : "Personal team token", text: $value).textFieldStyle(.plain).padding(.horizontal, 16).frame(height: 44)
                 .background(DesignSystem.surface, in: Capsule()).overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1))
                 .onSubmit { save() }
-            HStack { Text("Stored securely in your Mac’s Keychain.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted); Spacer(); Button(saving ? "Checking…" : "Connect") { save() }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(saving || value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            HStack {
+                Text("Stored securely in your Mac’s Keychain.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+                Spacer()
+                if model.tokenAccessRequired {
+                    Button("Unlock token") { model.unlockToken() }.buttonStyle(CirclesButtonStyle()).disabled(saving || model.isBusy)
+                }
+                Button(saving ? "Checking…" : "Connect") { save() }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(saving || value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
             if model.keyStatus == .rejected || model.keyStatus == .savedUnverified { KeyStatusLabel() }
         }
     }

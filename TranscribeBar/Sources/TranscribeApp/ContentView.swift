@@ -88,7 +88,7 @@ struct ContentView: View {
     private var emptyDetail: some View {
         VStack(alignment: .leading, spacing: 24) {
             Text(model.sidebar == .meetings ? "Meeting notes" : "Speak where you work").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
-            Text(model.sidebar == .meetings ? "Keep your notes, transcript and summary together." : "Double-tap Option to start and finish.").foregroundStyle(DesignSystem.muted)
+            Text(model.sidebar == .meetings ? "Keep your notes, transcript and summary together." : "Double-tap Option to start. Tap Option once to finish.").foregroundStyle(DesignSystem.muted)
             Button(model.sidebar == .meetings ? "New meeting" : "Try a dictation") { if model.sidebar == .meetings { model.meetingSetupPresented = true } else { model.startDictation() } }
                 .buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(model.isBusy)
             Spacer()

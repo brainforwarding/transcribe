@@ -5,6 +5,12 @@ import CryptoKit
 /// Inserts only into a still-valid accessible field. Recording never uses the clipboard.
 @MainActor
 final class PasteService {
+#if TRANSCRIBE_INSERTION_DIAGNOSTICS
+    private(set) var diagnosticWriteStatus: AXError?
+    func diagnosticMatches(_ destination: Destination, processID: pid_t, element: AXUIElement) -> Bool {
+        destination.processID == processID && CFEqual(destination.element, element)
+    }
+#endif
     struct Destination {
         fileprivate let processID: pid_t
         fileprivate let element: AXUIElement
@@ -15,19 +21,42 @@ final class PasteService {
     enum Outcome: Equatable {
         case inserted
         case ready(reason: String)
+        /// A write was attempted, but its result is unknown. Do not paste or copy again automatically.
+        case unconfirmed(reason: String)
+    }
+
+    enum CaptureOutcome {
+        case captured(Destination)
+        case unavailable(reason: String)
     }
 
     func captureDestination() -> Destination? {
-        guard AXIsProcessTrusted(),
-              let app = NSWorkspace.shared.frontmostApplication,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-              let element = focusedElement(in: app.processIdentifier),
-              isEditable(element),
-              let value = stringAttribute(element, kAXValueAttribute),
-              let range = selectedRange(element), valid(range, in: value)
-        else { return nil }
-        return Destination(processID: app.processIdentifier, element: element,
-                           range: range, fingerprint: fingerprint(value))
+        if case .captured(let destination) = captureDestinationResult() { return destination }
+        return nil
+    }
+
+    func captureDestinationResult() -> CaptureOutcome {
+        guard AXIsProcessTrusted() else {
+            return .unavailable(reason: "Enable Accessibility to insert text.")
+        }
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return .unavailable(reason: "Select a text field in another app before recording.")
+        }
+        guard let element = focusedElement(in: app.processIdentifier) else {
+            return .unavailable(reason: "The selected app did not expose a focused text field.")
+        }
+        guard isEditable(element) else {
+            return .unavailable(reason: "The selected field does not allow accessible text insertion.")
+        }
+        guard let value = stringAttribute(element, kAXValueAttribute) else {
+            return .unavailable(reason: "The selected field did not expose its text for safe insertion.")
+        }
+        guard let range = selectedRange(element), valid(range, in: value) else {
+            return .unavailable(reason: "The selected field did not expose a valid cursor position.")
+        }
+        return .captured(Destination(processID: app.processIdentifier, element: element,
+                                     range: range, fingerprint: fingerprint(value)))
     }
 
     func insert(_ text: String, at destination: Destination) -> Outcome {
@@ -46,21 +75,26 @@ final class PasteService {
             in: NSRange(location: range.location, length: range.length), with: text)
         let expectedCaret = CFRange(location: range.location + (text as NSString).length, length: 0)
         let status = AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, text as CFString)
-        guard status == .success else { return .ready(reason: "This field does not support direct insertion.") }
+#if TRANSCRIBE_INSERTION_DIAGNOSTICS
+        diagnosticWriteStatus = status
+#endif
+        guard status == .success else {
+            return .unconfirmed(reason: "Insertion could not be confirmed. Check the original field before pasting again.")
+        }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == destination.processID,
               let currentFocus = focusedElement(in: destination.processID), CFEqual(currentFocus, focused),
               stringAttribute(focused, kAXValueAttribute) == expected,
               let verifiedRange = selectedRange(focused), same(verifiedRange, expectedCaret)
-        else { return .ready(reason: "Insertion could not be confirmed. Your transcript is saved.") }
+        else { return .unconfirmed(reason: "Insertion could not be confirmed. Check the original field before pasting again.") }
         return .inserted
     }
 
     /// An explicit paste-last command intentionally captures the current, rather than old, caret.
     func pasteAtCurrentCaret(_ text: String) -> Outcome {
-        guard let destination = captureDestination() else {
-            return .ready(reason: "Select an editable text field, or copy the transcript.")
+        switch captureDestinationResult() {
+        case .captured(let destination): return insert(text, at: destination)
+        case .unavailable(let reason): return .ready(reason: reason)
         }
-        return insert(text, at: destination)
     }
 
     func copy(_ text: String) {

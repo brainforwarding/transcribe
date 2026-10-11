@@ -54,6 +54,8 @@ private final class Fixture {
     var stopSaveFails = false
     var artifact: URL?
     var insertedAfterDurableText = false
+    var automaticOutcome: PasteService.Outcome = .inserted
+    var manualOutcome: PasteService.Outcome = .inserted
     var levelCallback: (@Sendable (Source, Double) -> Void)?
 
     init() throws {
@@ -94,9 +96,9 @@ private final class Fixture {
             return { [self] text in
                 insertions += 1
                 insertedAfterDurableText = (try? store.load().first?.transcript) == text
-                return .inserted
+                return automaticOutcome
             }
-        }, pasteAtCurrentCaret: { [self] _ in manualPastes += 1; return .inserted },
+        }, pasteAtCurrentCaret: { [self] _ in manualPastes += 1; return manualOutcome },
         copy: { [self] _ in copies += 1 }, automaticTimer: false)
         model = AppModel(store: store, operations: operations, preferences: preferences, initializeSystemState: false)
         model.micGranted = true; model.hasKey = true
@@ -183,12 +185,15 @@ struct CoordinatorSelftest {
                 try check(reloaded?.canRecover == true, "Cancelled speech must survive reload")
             }),
             ("Escape during processing prevents late insertion and cleanup", { f in
+                f.automaticOutcome = .ready(reason: "Capture unavailable")
                 try await f.beginProcessing(); f.model.cancelDictation(); f.processing.release()
                 try await until("cancelled processing") { f.model.phase == .done }
                 try check(f.model.activeRecord?.transcript == "Saved speech", "Late final text must remain recoverable")
                 try check(f.model.activeRecord?.delivery == .cancelled && f.insertions == 0 && f.cleanups == 0,
                           "A late processing result cannot deliver or clean up cancelled speech")
                 try check(f.audioExists(), "Processing cancellation must retain audio")
+                try check(f.model.activeRecord?.issues.isEmpty == true,
+                          "A cancelled delivery must not acquire delivery diagnostics")
             }),
             ("Second toggle during startup and repeated finish stop exactly once", { f in
                 f.model.toggleDictation()
@@ -216,20 +221,90 @@ struct CoordinatorSelftest {
                 try check(f.stops == 1 && f.model.activeRecord?.duration == 300, "Deadline stop must run once with monotonic duration")
             }),
             ("Final persistence failure prevents insertion and actual deletion", { f in
+                f.automaticOutcome = .ready(reason: "Capture unavailable")
                 try await f.beginProcessing(); f.finalSaveFails = true; f.processing.release()
                 try await until("save error") { f.model.phase == .error }
                 try check(f.insertions == 0 && f.cleanups == 0 && f.audioExists(), "Failed final save must block insertion and deletion")
                 let saved = try f.store.load().first
                 try check(saved?.transcript.isEmpty == true && saved?.canRecover == true,
                           "Reload must recover audio without pretending failed final text was saved")
+                try check(f.model.activeRecord?.issues.isEmpty == true,
+                          "Delivery diagnostics cannot be committed before final text")
             }),
             ("Historical retry never automatically inserts", { f in
+                f.automaticOutcome = .ready(reason: "Capture unavailable")
                 let id = try f.addHistoricalRecord(status: .failed)
                 f.model.retry(id)
                 try await until("historical processing") { f.processing.entered }
                 f.processing.release(); try await until("historical completion") { f.model.phase == .done }
                 try check(f.starts == 0 && f.insertions == 0 && f.model.activeRecord?.delivery == .ready,
                           "Retry must save Ready text without capture or automatic insertion")
+                try check(f.model.activeRecord?.issues.isEmpty == true,
+                          "Historical processing must not report a new delivery attempt")
+            }),
+            ("Unavailable automatic destination retains its reason after durable text", { f in
+                let reason = "Enable Accessibility to insert text."
+                f.automaticOutcome = .ready(reason: reason)
+                try await f.beginProcessing(); f.processing.release()
+                try await until("unavailable destination completion") { f.model.phase == .done }
+                let saved = try f.store.load().first
+                try check(f.insertions == 1 && f.insertedAfterDurableText && f.copies == 0,
+                          "Captured delivery failure must resolve once after durable text without copying")
+                try check(saved?.status == .complete && saved?.delivery == .ready && saved?.issues == [reason],
+                          "Capture failure reason must survive reload without claiming insertion")
+                try check(saved?.transcriptionIssues.isEmpty == true && saved?.isPartial == false &&
+                          f.model.statusDetail == reason && f.model.chipState == .ready,
+                          "Delivery diagnostics must not create partial transcription or retry eligibility")
+            }),
+            ("Unconfirmed automatic write remains saved without claiming insertion", { f in
+                let reason = "Insertion unconfirmed. Check the original field before pasting again."
+                f.automaticOutcome = .unconfirmed(reason: reason)
+                try await f.beginProcessing(); f.processing.release()
+                try await until("unconfirmed automatic completion") { f.model.phase == .done }
+                let saved = try f.store.load().first
+                try check(f.insertions == 1 && f.insertedAfterDurableText && f.copies == 0,
+                          "An unconfirmed write must not automatically copy or retry")
+                try check(saved?.transcript == "Saved speech" && saved?.delivery == .ready &&
+                          saved?.issues == [reason] && f.model.statusDetail == reason,
+                          "Uncertainty must remain visible beside durable text without claiming verified insertion")
+            }),
+            ("Definitively ready manual paste copies once and saves its reason", { f in
+                let reason = "Select an editable field."
+                let id = try f.addHistoricalRecord(); f.manualOutcome = .ready(reason: reason)
+                f.model.pasteLast()
+                let saved = try f.store.load().first { $0.id == id }
+                try check(f.manualPastes == 1 && f.copies == 1 && f.insertions == 0,
+                          "A manual command with no write may prepare exactly one explicit copy")
+                try check(saved?.issues == [reason] && f.model.statusDetail == reason,
+                          "Manual delivery diagnostics must survive reload")
+                f.model.pasteLast()
+                let repeated = try f.store.load().first { $0.id == id }
+                try check(f.copies == 2 && repeated?.issues == [reason],
+                          "Each explicit command may copy once without duplicating its saved warning")
+                f.manualOutcome = .inserted; f.model.pasteLast()
+                let successful = try f.store.load().first { $0.id == id }
+                try check(f.model.statusDetail.isEmpty && f.model.chipState == .inserted &&
+                          f.copies == 2 && successful?.issues == [reason],
+                          "Confirmed manual insertion must clear stale current feedback while retaining history")
+            }),
+            ("Unconfirmed manual write never copies or changes cancellation recovery", { f in
+                let reason = "Insertion unconfirmed. Check the original field before pasting again."
+                let id = try f.addHistoricalRecord(); f.manualOutcome = .unconfirmed(reason: reason)
+                f.model.pasteLast()
+                let saved = try f.store.load().first { $0.id == id }
+                try check(f.manualPastes == 1 && f.copies == 0 && saved?.issues == [reason],
+                          "Uncertain manual writes must leave the clipboard untouched and save their warning")
+                var cancelled = f.model.records[0]
+                cancelled.status = .cancelled; cancelled.delivery = .cancelled; cancelled.issues = []
+                try f.store.save(cancelled); f.model.records[0] = cancelled
+                f.model.pasteLast()
+                let after = try f.store.load().first { $0.id == id }
+                try check(f.copies == 0 && after?.issues.isEmpty == true && after?.delivery == .cancelled,
+                          "An explicit manual command must not contaminate cancelled-transcript recovery state")
+                f.model.retry(id)
+                try check(f.model.activeRecord?.status == .complete && f.model.activeRecord?.delivery == .ready &&
+                          f.transcriptionRequests == 0 && f.insertions == 0,
+                          "Cancelled final text must still recover without upload or automatic insertion")
             }),
             ("Paste-last while recording preserves indicator and warning", { f in
                 _ = try f.addHistoricalRecord(); try await f.beginRecording()

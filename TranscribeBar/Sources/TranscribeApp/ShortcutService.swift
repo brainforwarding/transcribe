@@ -1,6 +1,24 @@
 import AppKit
 import CoreGraphics
 
+enum OptionShortcutContext: Equatable {
+    case idle
+    case capturing(UUID)
+    case disabled
+}
+
+enum OptionShortcutAction: Equatable {
+    case start
+    case stop(UUID)
+
+    func isApplicable(to context: OptionShortcutContext) -> Bool {
+        switch self {
+        case .start: return context == .idle
+        case .stop(let id): return context == .capturing(id)
+        }
+    }
+}
+
 /// Recognizes complete, brief Option taps; typing and other modifiers invalidate the pair.
 struct OptionTapRecognizer {
     static let maximumHold: TimeInterval = 0.35
@@ -8,6 +26,7 @@ struct OptionTapRecognizer {
     private var pressedAt: TimeInterval?
     private var releasedAt: TimeInterval?
     private var cleanPress = false
+    private var context: OptionShortcutContext?
 
     mutating func invalidate() {
         pressedAt = nil
@@ -17,23 +36,33 @@ struct OptionTapRecognizer {
 
     mutating func flagsChanged(optionDown: Bool, otherModifiers: Bool,
                                keyCode: UInt16, at time: TimeInterval) -> Bool {
-        guard !otherModifiers, keyCode == 58 || keyCode == 61 else { invalidate(); return false }
+        flagsChanged(optionDown: optionDown, otherModifiers: otherModifiers,
+                     keyCode: keyCode, at: time, context: .idle) == .start
+    }
+
+    mutating func flagsChanged(optionDown: Bool, otherModifiers: Bool,
+                               keyCode: UInt16, at time: TimeInterval,
+                               context newContext: OptionShortcutContext) -> OptionShortcutAction? {
+        if context != newContext { invalidate(); context = newContext }
+        guard newContext != .disabled, !otherModifiers, keyCode == 58 || keyCode == 61
+        else { invalidate(); return nil }
         if optionDown {
-            guard pressedAt == nil else { invalidate(); return false }
+            guard pressedAt == nil else { invalidate(); return nil }
             pressedAt = time
             cleanPress = true
-            return false
+            return nil
         }
         guard cleanPress, let pressedAt, time >= pressedAt,
-              time - pressedAt <= Self.maximumHold else { invalidate(); return false }
+              time - pressedAt <= Self.maximumHold else { invalidate(); return nil }
         self.pressedAt = nil
         cleanPress = false
+        if case .capturing(let id) = newContext { releasedAt = nil; return .stop(id) }
         if let previous = releasedAt, time >= previous, time - previous <= Self.maximumGap {
             releasedAt = nil
-            return true
+            return .start
         }
         releasedAt = time
-        return false
+        return nil
     }
 }
 
@@ -67,7 +96,9 @@ struct ShortcutKeyRecognizer {
 /// Runs an active event tap so Escape can be consumed during dictation without reaching
 /// the underlying application. The tap is attached to the main run loop.
 final class ShortcutService {
-    var onToggleDictation: (() -> Void)?
+    var dictationContext: () -> OptionShortcutContext = { .idle }
+    var onStartDictation: (() -> Void)?
+    var onStopDictation: ((UUID) -> Void)?
     var onCancel: (() -> Void)?
     var onPasteLast: (() -> Void)?
     var onAvailabilityChanged: ((Bool) -> Void)?
@@ -128,10 +159,21 @@ final class ShortcutService {
         let flags = event.flags
         if type == .flagsChanged {
             let others: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskSecondaryFn]
-            if recognizer.flagsChanged(optionDown: flags.contains(.maskAlternate),
+            if let action = recognizer.flagsChanged(optionDown: flags.contains(.maskAlternate),
                 otherModifiers: !flags.intersection(others).isEmpty,
-                keyCode: code, at: TimeInterval(event.timestamp) / 1_000_000_000) {
-                DispatchQueue.main.async { [weak self] in self?.onToggleDictation?() }
+                keyCode: code, at: TimeInterval(event.timestamp) / 1_000_000_000,
+                context: dictationContext()) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, action.isApplicable(to: self.dictationContext()) else { return }
+                    // Bind the recognized action to its original session. A delayed stop
+                    // cannot become a start after recording/transcription finishes.
+                    switch action {
+                    case .start:
+                        self.onStartDictation?()
+                    case .stop(let id):
+                        self.onStopDictation?(id)
+                    }
+                }
             }
         } else if type == .keyDown {
             recognizer.invalidate()

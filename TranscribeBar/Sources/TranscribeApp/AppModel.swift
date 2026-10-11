@@ -58,8 +58,10 @@ final class AppModel: ObservableObject {
                 return OpenAIConfig(baseURL: Config.apiBaseURL, authValue: "Bearer \(token)")
             }, save: { try $0.save($1) }, cleanAudio: { try $0.cleanAudio(for: $1) },
             captureInsertion: {
-                guard let destination = paste.captureDestination() else { return nil }
-                return { paste.insert($0, at: destination) }
+                switch paste.captureDestinationResult() {
+                case .captured(let destination): return { paste.insert($0, at: destination) }
+                case .unavailable(let reason): return { _ in .ready(reason: reason) }
+                }
             }, pasteAtCurrentCaret: { paste.pasteAtCurrentCaret($0) }, copy: { paste.copy($0) })
         }
     }
@@ -87,6 +89,7 @@ final class AppModel: ObservableObject {
     @Published var screenGranted = false
     @Published var accessibilityGranted = false
     @Published var hasKey = false
+    @Published var tokenAccessRequired = false
     @Published var keyStatus: KeyStatus = .idle
     @Published var consentAccepted: Bool
     @Published var meetingMode: MeetingMode = .online
@@ -128,7 +131,7 @@ final class AppModel: ObservableObject {
     var ready: Bool { micGranted && hasKey && consentAccepted && keyStatus != .checking && keyStatus != .rejected }
     var needsSetup: Bool { !ready }
     var micOnly: Bool { get { meetingMode == .inPerson } set { meetingMode = newValue ? .inPerson : .online } }
-    var keyFingerprint: String? { Keychain.get().map { String($0.suffix(4)) } }
+    var keyFingerprint: String? { Keychain.cachedFingerprint }
     var chipWidth: CGFloat {
         switch chipState {
         case .recording: return activeKind == .meeting ? 192 : 164
@@ -159,7 +162,10 @@ final class AppModel: ObservableObject {
         appearance = p.string(forKey: "appearance") ?? "system"
         dictionaryWords = p.stringArray(forKey: "dictionaryWords") ?? []
         selectedMicID = p.string(forKey: "selectedMicID")
-        if initializeSystemState { hasKey = Keychain.get() != nil }
+        if initializeSystemState {
+            hasKey = Keychain.get() != nil
+            tokenAccessRequired = Keychain.needsAccess
+        }
         do {
             let s = try suppliedStore ?? SessionStore(); store = s; records = try s.load()
             records.sort { $0.startedAt > $1.startedAt }
@@ -173,6 +179,7 @@ final class AppModel: ObservableObject {
     func refreshPermissions() async {
         micGranted = Permissions.micAuthorized(); accessibilityGranted = Permissions.accessibilityAuthorized()
         screenGranted = CGPreflightScreenCaptureAccess(); hasKey = Keychain.get() != nil
+        tokenAccessRequired = Keychain.needsAccess
     }
     func grantMic() { Task { _ = await Permissions.requestMic(); await refreshPermissions(); refreshMics() } }
     func grantScreen() { Permissions.requestScreen(); Task { await refreshPermissions() } }
@@ -222,9 +229,22 @@ final class AppModel: ObservableObject {
         }
     }
     func saveKey(_ key: String) { Task { _ = await saveAndVerifyKey(key) } }
+    func unlockToken() {
+        guard !isBusy else { return }
+        hasKey = Keychain.unlock() != nil
+        tokenAccessRequired = Keychain.needsAccess
+        if hasKey {
+            if keyStatus == .idle || keyStatus == .savedUnverified { keyStatus = .savedUnverified }
+            statusDetail = "Token unlocked"
+        } else {
+            if keyStatus == .idle || keyStatus == .savedUnverified { keyStatus = .idle }
+            statusDetail = tokenAccessRequired ? "Token access required" : "Add your team token"
+        }
+    }
     func saveAndVerifyKey(_ key: String) async -> Bool {
         let value = key.trimmingCharacters(in: .whitespacesAndNewlines); guard !value.isEmpty else { return false }
-        do { try Keychain.set(value); hasKey = true } catch { statusDetail = "Token could not be saved"; return false }
+        do { try Keychain.set(value); hasKey = true; tokenAccessRequired = false }
+        catch { statusDetail = "Token could not be saved"; return false }
         guard let base = Config.proxyBaseURL else { keyStatus = .verified; return true }
         keyStatus = .checking
         var req = URLRequest(url: base.appendingPathComponent("chat/completions")); req.httpMethod = "POST"; req.timeoutInterval = 10
@@ -368,7 +388,9 @@ final class AppModel: ObservableObject {
                     else if current.status == .complete, r.delivery == .eligible, let insertion = self.automaticInsertion {
                         switch insertion(current.transcript) {
                         case .inserted: _ = self.mutate(id) { $0.delivery = .inserted }; self.setChip(.inserted, dismissAfter: 2)
-                        case .ready: self.setChip(.ready, dismissAfter: 12)
+                        case .ready(let reason), .unconfirmed(let reason):
+                            self.noteDeliveryIssue(reason, for: id)
+                            self.setChip(.ready, dismissAfter: 12)
                         }
                     } else { self.setChip(.ready, dismissAfter: 12) }
                 } else {
@@ -440,7 +462,26 @@ final class AppModel: ObservableObject {
     func copyTranscript(_ id: UUID) { if let r = records.first(where: { $0.id == id }), r.hasText { operations.copy(r.transcript) } }
     func pasteLast() {
         guard !isBusy, let r = lastRecordWithText else { return }
-        switch operations.pasteAtCurrentCaret(r.transcript) { case .inserted: setChip(.inserted, dismissAfter: 2); case .ready: operations.copy(r.transcript); setChip(.ready, dismissAfter: 8) }
+        switch operations.pasteAtCurrentCaret(r.transcript) {
+        case .inserted: statusDetail = ""; setChip(.inserted, dismissAfter: 2)
+        case .ready(let reason):
+            noteDeliveryIssue(reason, for: r.id)
+            operations.copy(r.transcript); setChip(.ready, dismissAfter: 8)
+        case .unconfirmed(let reason):
+            // A write may already have succeeded. Do not prepare a duplicate paste.
+            noteDeliveryIssue(reason, for: r.id)
+            setChip(.ready, dismissAfter: 12)
+        }
+    }
+    private func noteDeliveryIssue(_ reason: String, for id: UUID) {
+        let detail = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !detail.isEmpty else { return }
+        statusDetail = detail
+        guard let record = records.first(where: { $0.id == id }),
+              record.status != .cancelled, record.delivery != .cancelled,
+              !record.issues.contains(detail) else { return }
+        // Keep delivery diagnostics separate from transcription retry eligibility.
+        _ = mutate(id) { $0.issues.append(detail) }
     }
     func copyLast() { if let r = lastRecordWithText { copyTranscript(r.id) } }
     func export(_ id: UUID) {

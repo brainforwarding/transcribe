@@ -24,7 +24,7 @@ Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac
 
 ## Dictation
 
-- Double-tap Option to start and finish. A small chip shows input and elapsed time.
+- Double-tap Option to start. Tap Option once to finish. A small chip shows input and elapsed time.
 - At 4:30 the chip shows the 30-second warning. Recording stops at five minutes.
 - Text inserts into the original field only if its app, field, value and selection are still valid. Otherwise it stays ready to copy.
 - Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.

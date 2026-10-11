@@ -17,7 +17,7 @@ struct ChipView: View {
                     .foregroundStyle(model.chipState == .warning ? DesignSystem.warning : DesignSystem.muted)
                     .frame(width: model.chipState == .warning ? 54 : model.activeKind == .meeting ? 62 : 34, alignment: .leading)
                 Spacer(minLength: 0)
-                iconButton("chip-imgIconStop", "Finish · double Option") {
+                iconButton("chip-imgIconStop", model.activeKind == .meeting ? "Finish meeting" : "Finish · Option") {
                     model.finishRecording()
                 }
             case .transcribing:
@@ -39,7 +39,13 @@ struct ChipView: View {
                 iconButton("chip-imgIconCopy", "Copy last") { copyLast() }
             case .ready:
                 DesignIcon(name: "chip-imgIconCopy1", size: 14, color: DesignSystem.action)
-                Text("Ready")
+                if model.statusDetail.isEmpty {
+                    Text("Ready")
+                } else {
+                    Text("Ready")
+                        .help(model.statusDetail)
+                        .accessibilityHint(Text(model.statusDetail))
+                }
                 Spacer(minLength: 0)
                 linkButton("Copy") { copyLast() }
             case .cancelled:
