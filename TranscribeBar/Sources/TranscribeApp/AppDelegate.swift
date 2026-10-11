@@ -27,12 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Paste last transcript    ⌥ ⇧ V", #selector(pasteLast), symbol: "doc.on.clipboard", to: menu, tag: 3)
         menu.addItem(.separator())
         add("Open Transcribe", #selector(openLibrary), symbol: "waveform", to: menu)
-        add("Settings…", #selector(openSettings), symbol: "gearshape", to: menu)
         menu.addItem(.separator())
         add("Quit Transcribe", #selector(quit), symbol: "power", to: menu)
         statusItem.menu = menu
 
-        model.showLibrary = { [weak self] in self?.openLibrary() }
+        model.showLibrary = { [weak self] in self?.showLibraryWindow() }
         model.showSettings = { [weak self] in self?.openSettings() }
         model.retryShortcuts = { [weak self] in self?.shortcuts.start() }
         shortcuts.dictationContext = { [weak self] in
@@ -51,7 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         shortcuts.onCancel = { [weak self] in
             guard let self else { return }
-            if self.model.activeKind == .meeting { self.model.chipVisible = false }
+            if self.model.formattingRecordID != nil { self.model.cancelFormattingRetry() }
+            else if self.model.activeKind == .meeting { self.model.chipVisible = false }
             else { self.model.cancelDictation() }
         }
         shortcuts.onPasteLast = { [weak self] in self?.model.pasteLast() }
@@ -111,8 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             shortcuts.setPasteLastShortcut(enabled: model.pasteLastShortcutEnabled)
             pasteShortcutEnabled = model.pasteLastShortcutEnabled
         }
-        shortcuts.consumesEscape = model.activeKind == .dictation &&
-            [.starting, .recording, .stopping, .transcribing].contains(model.phase)
+        shortcuts.consumesEscape = model.formattingRecordID != nil || (model.activeKind == .dictation &&
+            [.starting, .recording, .stopping, .transcribing].contains(model.phase))
         shortcuts.observesEscapeDuringMeeting = model.activeKind == .meeting && model.isBusy
         NSApp.appearance = model.appearance == "dark" ? NSAppearance(named: .darkAqua)
             : model.appearance == "light" ? NSAppearance(named: .aqua) : nil
@@ -156,6 +156,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func openLibrary() {
+        model.sidebar = .dictation
+        model.selectedRecordID = nil
+        model.searchText = ""
+        model.meetingSetupPresented = false
+        showLibraryWindow()
+    }
+
+    private func showLibraryWindow() {
         if libraryWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -176,6 +184,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.selectedRecordID = nil
         model.searchText = ""
         model.meetingSetupPresented = false
-        openLibrary()
+        showLibraryWindow()
     }
 }

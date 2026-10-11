@@ -1,0 +1,62 @@
+import Foundation
+
+/// Safe categories only. Provider bodies, messages and credential values are never persisted.
+public enum ServiceFailureKind: String, Codable, Sendable, Equatable {
+    case invalidCredential, accessDenied, insufficientCredits, billingLimit, rateLimited
+    case unavailable, invalidResponse, invalidHints, tooLarge, storage
+    public var allowsRecoveryAfterRemedy: Bool {
+        switch self {
+        case .invalidCredential, .accessDenied, .insufficientCredits, .billingLimit: return true
+        default: return false
+        }
+    }
+}
+
+public struct DictationFormatResult: Sendable, Equatable {
+    public let text: String
+    public let failure: ServiceFailureKind?
+    public init(text: String, failure: ServiceFailureKind? = nil) { self.text = text; self.failure = failure }
+}
+
+extension ProviderError {
+    public var failureKind: ServiceFailureKind? {
+        switch self {
+        case .authentication: return .invalidCredential
+        case .accessDenied: return .accessDenied
+        case .insufficientCredits: return .insufficientCredits
+        case .billingLimit: return .billingLimit
+        case .quota: return .rateLimited
+        case .unavailable: return .unavailable
+        case .invalidResponse: return .invalidResponse
+        case .invalidHints: return .invalidHints
+        case .tooLarge: return .tooLarge
+        case .cacheWrite: return .storage
+        case .rejected: return .accessDenied
+        case .cancelled: return nil
+        }
+    }
+}
+
+func classifiedProviderError(status: Int, body: Data) -> ProviderError {
+    struct Envelope: Decodable {
+        struct Detail: Decodable { let code: String?; let type: String? }
+        let error: Detail
+    }
+    let detail = body.count <= 16_384 ? (try? JSONDecoder().decode(Envelope.self, from: body))?.error : nil
+    switch detail?.code {
+    case "credit_balance_exhausted": return .insufficientCredits
+    case "project_spend_limit_exceeded", "organization_spend_limit_exceeded", "organization_usage_limit_exceeded", "insufficient_quota": return .billingLimit
+    case "rate_limit_exceeded", "slow_down": return .quota
+    case "invalid_api_key": return .authentication
+    default: break
+    }
+    if detail?.type == "insufficient_quota" { return .billingLimit }
+    switch status {
+    case 401: return .authentication
+    case 403: return .accessDenied
+    case 413: return .tooLarge
+    case 429: return .quota
+    case 500...599: return .unavailable
+    default: return .rejected(status)
+    }
+}

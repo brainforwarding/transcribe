@@ -6,8 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
 APP="$ROOT/build/Transcribe.app"
 IDENTITY="${SIGN_IDENTITY:-}"
-VERSION="${APP_VERSION:-2.0.6}"
-BUILD_NUMBER="${APP_BUILD_NUMBER:-8}"
+VERSION="${APP_VERSION:-2.0.7}"
+BUILD_NUMBER="${APP_BUILD_NUMBER:-9}"
 case "$CONFIG" in debug|release) ;; *) echo "Usage: $0 [debug|release]" >&2; exit 1 ;; esac
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "APP_VERSION must be major.minor.patch" >&2; exit 1; }
 [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "APP_BUILD_NUMBER must be numeric" >&2; exit 1; }

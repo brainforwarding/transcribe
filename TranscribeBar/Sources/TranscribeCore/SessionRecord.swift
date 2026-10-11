@@ -24,6 +24,8 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var preview: String
     public var transcript: String
     public var rawTranscript: String?
+    public var formattingFailure: ServiceFailureKind?
+    public var serviceProviderID: String?
     public var segments: [Segment]
     public var summary: String
     public var summaryStatus: SummaryStatus
@@ -47,7 +49,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         self.title = title; self.startedAt = startedAt; self.language = language
         self.keywords = keywords; duration = 0; status = .starting
         delivery = kind == .dictation ? .eligible : .never
-        notes = ""; preview = ""; transcript = ""; rawTranscript = nil; segments = []
+        notes = ""; preview = ""; transcript = ""; rawTranscript = nil; formattingFailure = nil; serviceProviderID = nil; segments = []
         summary = ""; summaryStatus = .none; summaryEvidenceIDs = []; summaryEvidence = []; summaryNotesSnapshot = ""
         issues = []; transcriptionIssues = []; tracks = []; captureIncomplete = false
         exportURL = nil; importURL = nil; imported = false
@@ -55,14 +57,14 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
 
     public var canRecover: Bool {
         let hasAudio = tracks.contains { !$0.spans.isEmpty }
-        if status == .partial { return hasAudio && transcriptionIssues.contains { $0.retryable } }
+        if status == .partial { return hasAudio && transcriptionIssues.contains { $0.retryable || $0.failureKind?.allowsRecoveryAfterRemedy == true } }
         return hasAudio && (status == .failed || status == .cancelled)
     }
     public var isPartial: Bool { status == .partial || captureIncomplete }
     public var hasText: Bool { !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private enum CodingKeys: String, CodingKey {
-        case id, kind, meetingMode, title, startedAt, duration, status, delivery, notes, preview, transcript, rawTranscript,
+        case id, kind, meetingMode, title, startedAt, duration, status, delivery, notes, preview, transcript, rawTranscript, formattingFailure, serviceProviderID,
              segments, summary, summaryStatus, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
              issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords
     }
@@ -81,6 +83,8 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         preview = try v.decodeIfPresent(String.self, forKey: .preview) ?? ""
         transcript = try v.decodeIfPresent(String.self, forKey: .transcript) ?? ""
         rawTranscript = try v.decodeIfPresent(String.self, forKey: .rawTranscript)
+        formattingFailure = try v.decodeIfPresent(ServiceFailureKind.self, forKey: .formattingFailure)
+        serviceProviderID = try v.decodeIfPresent(String.self, forKey: .serviceProviderID)
         segments = try v.decodeIfPresent([Segment].self, forKey: .segments) ?? []
         summary = try v.decodeIfPresent(String.self, forKey: .summary) ?? ""
         summaryStatus = try v.decodeIfPresent(SummaryStatus.self, forKey: .summaryStatus) ?? .none

@@ -43,8 +43,11 @@ public struct TranscriptionIssue: Codable, Sendable, Equatable {
     public let spanID: String?
     public let userMessage: String
     public let retryable: Bool
-    public init(source: Source? = nil, spanID: String? = nil, userMessage: String, retryable: Bool = true) {
+    public let failureKind: ServiceFailureKind?
+    public init(source: Source? = nil, spanID: String? = nil, userMessage: String, retryable: Bool = true,
+                failureKind: ServiceFailureKind? = nil) {
         self.source = source; self.spanID = spanID; self.userMessage = userMessage; self.retryable = retryable
+        self.failureKind = failureKind
     }
 }
 

@@ -78,6 +78,7 @@ private final class Fixture {
     let verificationSession: URLSession
     var seenProvider: ConnectionProvider?
     var seenConfig: OpenAIConfig?
+    var seenFormattingConfig: OpenAIConfig?
     let startup = Gate()
     let processing = Gate()
     let delivery = Gate()
@@ -90,6 +91,8 @@ private final class Fixture {
     var formattedSaveFails = false
     var cancellationSaveFails = false
     var formattedText = "Saved speech."
+    var formatFailure: ServiceFailureKind? = nil
+    var transcriptionFailure: ServiceFailureKind? = nil
     var finalText = "Saved speech"
     var finalComplete = true
     var blocksDelivery = false
@@ -152,7 +155,8 @@ private final class Fixture {
         }, transcribe: { [self] _, _, config in
             seenConfig = config
             transcriptionRequests += 1; await processing.wait()
-            return FinalTranscription(text: finalText, segments: [], complete: finalComplete, issues: [])
+            return FinalTranscription(text: finalText, segments: [], complete: finalComplete && transcriptionFailure == nil,
+                issues: transcriptionFailure.map { [TranscriptionIssue(userMessage: "Safe fixture failure", retryable: false, failureKind: $0)] } ?? [])
         }, uptime: { [self] in now }, credentials: { [self] provider in
             seenProvider = provider
             guard let credential = credentialVault.get(provider) else { throw CheckFailure(description: "Missing synthetic credential") }
@@ -181,14 +185,15 @@ private final class Fixture {
             return automatic ? automaticOutcome : manualOutcome
         },
         copy: { [self] _ in copies += 1 }, automaticTimer: false, format: { [self] raw, config in
-            guard formatterEnabled else { return raw }
+            guard formatterEnabled else { return DictationFormatResult(text: raw) }
             formatterRequests += 1
+            seenFormattingConfig = config
             let saved = try store.load().first
             rawSavedBeforeFormatting = saved?.transcript == raw && saved?.rawTranscript == raw &&
                 seenConfig?.baseURL == config.baseURL && seenConfig?.authValue == config.authValue
             if blocksFormatting { await formatting.wait() }
             if formattingCancelled { throw CancellationError() }
-            return formattedText
+            return DictationFormatResult(text: formattedText, failure: formatFailure)
         })
         model = AppModel(store: store, operations: operations, preferences: preferences, initializeSystemState: false,
             credentialAccess: credentialAccess, verificationSession: verificationSession)
@@ -215,6 +220,14 @@ private final class Fixture {
         try await until("manual paste completion") { deliveryCompletions > previous }
     }
     func audioExists() -> Bool { artifact.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
+    func addFormattingRecord(failure: ServiceFailureKind = .unavailable) throws -> UUID {
+        var record = SessionRecord(kind: .dictation, title: "Synthetic formatter retry")
+        record.status = .complete; record.delivery = .inserted
+        record.transcript = "Saved speech"; record.rawTranscript = "Saved speech"
+        record.formattingFailure = failure; record.serviceProviderID = ConnectionProvider.openAI.rawValue
+        try store.save(record); model.records = try store.load()
+        return record.id
+    }
     func addHistoricalRecord(status: SessionStatus = .complete) throws -> UUID {
         var record = SessionRecord(kind: .dictation, title: "Earlier dictation", startedAt: Date(timeIntervalSince1970: 1))
         record.status = status; record.delivery = .ready; record.transcript = status == .complete ? "Earlier text" : ""
@@ -231,6 +244,123 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
+            ("Formatter failure persists separately and raw text still delivers", { f in
+                f.formatterEnabled = true; f.formattedText = "Saved speech"; f.formatFailure = .unavailable
+                try await f.beginProcessing(); f.processing.release()
+                try await until("formatter fallback delivery") { f.model.phase == .done }
+                let record = try f.store.load().first!
+                try check(record.status == .complete && record.formattingFailure == .unavailable &&
+                          record.transcript == "Saved speech" && record.rawTranscript == "Saved speech" &&
+                          record.transcriptionIssues.isEmpty && f.deliveryWrites == 1 && f.copies == 0,
+                          "Formatter failure must keep raw successful ASR and normal delivery")
+                try check(f.model.serviceNotice(for: record)?.action == .retryFormatting &&
+                          f.model.canRetryFormatting(record), "Formatting must offer a distinct text-only retry")
+            }),
+            ("Manual formatting retry preserves coordinator and insertion history", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                let id = try f.addFormattingRecord()
+                let phase = f.model.phase; let activeID = f.model.activeSessionID
+                f.model.retryFormatting(id)
+                try await until("manual formatting entry") { f.formatting.entered }
+                try check(f.model.isBusy && f.model.formattingRecordID == id && f.model.phase == phase &&
+                          f.model.activeSessionID == activeID, "Dedicated formatting must not reinterpret capture state")
+                f.model.retryFormatting(id); f.model.startDictation(); f.model.pasteLast(); f.model.setConnectionProvider(.team)
+                try check(f.formatterRequests == 1 && f.starts == 0 && f.manualPastes == 0 &&
+                          f.model.connectionProvider == .openAI, "Formatting must serialize capture, paste, provider switches and retries")
+                f.formatting.release(); try await until("manual formatting completion") { f.model.formattingRecordID == nil }
+                let saved = try f.store.load().first!
+                try check(saved.transcript == f.formattedText && saved.rawTranscript == "Saved speech" &&
+                          saved.formattingFailure == nil && saved.status == .complete && saved.delivery == .inserted &&
+                          f.model.phase == phase && f.model.activeSessionID == activeID && f.transcriptionRequests == 0 &&
+                          f.deliveryWrites == 0 && f.insertions == 0 && f.cleanups == 0 && f.copies == 0,
+                          "Manual formatting can commit only text/failure, never ASR, insertion or cleanup")
+                try check(f.seenFormattingConfig?.baseURL == ConnectionProvider.openAI.baseURL,
+                          "Manual formatter must use the selected-provider config snapshot")
+            }),
+            ("Cancelling manual formatting retains prior durable text and failure", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                let id = try f.addFormattingRecord(); f.model.retryFormatting(id)
+                try await until("cancel manual entry") { f.formatting.entered }
+                f.model.cancelFormattingRetry(); f.formatting.release()
+                try await until("cancel manual completion") { f.model.formattingRecordID == nil }
+                let record = try f.store.load().first!
+                try check(record.transcript == "Saved speech" && record.formattingFailure == .unavailable &&
+                          record.delivery == .inserted && f.deliveryWrites == 0 && f.model.phase == .idle,
+                          "Late formatter output must not overwrite a cancelled manual attempt")
+            }),
+            ("Manual formatting rejects stale text and leaves failed commits unchanged", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                let id = try f.addFormattingRecord(); f.model.retryFormatting(id)
+                try await until("stale manual entry") { f.formatting.entered }
+                var changed = f.model.records.first!; changed.transcript = "Edited text"
+                try f.store.save(changed); f.model.records[0] = changed
+                f.formatting.release(); try await until("stale manual completion") { f.model.formattingRecordID == nil }
+                let staleSaved = try f.store.load().first!
+                try check(staleSaved.transcript == "Edited text", "Stale output cannot overwrite newer text")
+                changed.transcript = "Saved speech"; try f.store.save(changed); f.model.records[0] = changed
+                f.formattedSaveFails = true; f.model.retryFormatting(id)
+                try await until("manual save failure") { f.model.formattingRecordID == nil }
+                let record = try f.store.load().first!
+                try check(record.transcript == "Saved speech" && record.formattingFailure == .unavailable &&
+                          f.deliveryWrites == 0 && f.cleanups == 0, "Failed manual commits must preserve original durable content")
+            }),
+            ("Quit cancels pending manual formatting without changing history", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                let id = try f.addFormattingRecord(); f.model.retryFormatting(id)
+                try await until("quit manual entry") { f.formatting.entered }
+                var quitStarted = false
+                let quitting = Task { @MainActor in quitStarted = true; await f.model.prepareToQuit() }
+                try await until("quit cancellation started") { quitStarted }
+                f.formatting.release(); await quitting.value
+                let record = try f.store.load().first!
+                try check(f.model.formattingRecordID == nil && !f.model.isBusy &&
+                          record.transcript == "Saved speech" && record.formattingFailure == .unavailable &&
+                          record.delivery == .inserted && f.transcriptionRequests == 0 && f.deliveryWrites == 0 && f.cleanups == 0,
+                          "Quit must clear pending formatting and preserve durable history with no other operation")
+            }),
+            ("Typed empty ASR credential failures stay actionable and recover after remedy", { f in
+                f.finalText = ""; f.transcriptionFailure = .invalidCredential
+                try await f.beginProcessing(); f.processing.release()
+                try await until("account ASR failure") { f.model.phase == .done }
+                let record = f.model.activeRecord!
+                try check(record.status == .partial && record.canRecover && !record.hasText &&
+                          f.model.serviceNotice(for: record)?.action == .settings,
+                          "Empty account failures must retain their account action and saved audio recovery")
+                f.transcriptionFailure = nil; f.finalText = "Saved speech"; f.model.retry(record.id)
+                try await until("account ASR recovery") { f.model.phase == .done && f.transcriptionRequests == 2 }
+                try check(f.model.activeRecord?.status == .complete && f.insertions == 0,
+                          "Retry after remedy uses saved audio without automatic insertion")
+            }),
+            ("Account advice uses persisted provider and prefers account repair", { f in
+                let id = try f.addFormattingRecord(failure: .insufficientCredits)
+                var record = f.model.records.first!
+                f.model.setConnectionProvider(.team)
+                try check(f.model.serviceNotice(for: record)?.buttonTitle == "Add credits" &&
+                          f.model.serviceNotice(for: record)?.action == .billing,
+                          "Changing selected provider cannot redirect old OpenAI credit advice")
+                record.serviceProviderID = "team"
+                try check(f.model.serviceNotice(for: record)?.buttonTitle == "Settings" &&
+                          f.model.serviceNotice(for: record)?.action == .settings, "Team credits cannot direct users to personal billing")
+                record.serviceProviderID = nil
+                try check(f.model.serviceNotice(for: record)?.action == .settings, "Legacy unknown accounts need neutral Settings advice")
+                record.serviceProviderID = "openAI"; record.formattingFailure = .billingLimit
+                try check(f.model.serviceNotice(for: record)?.buttonTitle == "Check billing", "Limits must not falsely claim exhausted credits")
+                record.transcriptionIssues = [TranscriptionIssue(userMessage: "Unavailable", failureKind: .unavailable),
+                    TranscriptionIssue(userMessage: "Access", failureKind: .accessDenied)]
+                try check(f.model.serviceNotice(for: record)?.action == .settings, "Account setup should outrank transient retry")
+                record.transcriptionIssues = [TranscriptionIssue(userMessage: "Too large", retryable: false, failureKind: .tooLarge)]
+                try check(f.model.serviceNotice(for: record)?.action == nil,
+                          "App-controlled oversized chunks cannot offer an irrelevant Settings remedy")
+                _ = id
+            }),
+            ("Legacy raw and successful unchanged text cannot trigger formatter retry", { f in
+                f.formatterEnabled = true
+                _ = try f.addHistoricalRecord(); var record = f.model.records.first!
+                record.formattingFailure = .unavailable
+                try check(!f.model.canRetryFormatting(record), "Legacy nil raw text must never be invented")
+                record.rawTranscript = record.transcript; record.formattingFailure = nil
+                try check(!f.model.canRetryFormatting(record), "Successful unchanged text has no failed formatting to retry")
+            }),
             ("Formatter saves raw first and accepted paragraphs before current-caret delivery", { f in
                 f.formatterEnabled = true; f.blocksFormatting = true
                 f.formattedText = "Saved\n\nspeech."

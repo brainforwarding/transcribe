@@ -4,7 +4,7 @@ The native two-mode implementation is tracked in [docs/IMPLEMENTATION.md](docs/I
 
 ## Current release readiness
 
-The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The existing Team token is provisioned and the owner reports working transcription. The owner is provisioning new Apple notarization credentials in 1Password and the local `meetrec-notary` profile. Do not publish this version before final workflow verification and notarization. The owner handles real audio, formatting and paste acceptance; agents must not resume those tests without further instruction.
+The Developer ID identity available on this Mac is **Developer ID Application: ED4.ONE SpA (K542ZFQH6B)**. The existing Team token is provisioned and the owner reports working transcription and paragraph formatting. Apple notarization credentials are canonical in **Sebastian Work → Transcribe — Apple notarization**, username/password fields. The local `meetrec-notary` profile is provisioned and validated. Do not publish this version before final workflow verification and notarization. The owner handles real audio, formatting and paste acceptance; agents must not resume those tests without further instruction.
 
 Development secrets are canonical in 1Password. App tokens go into the existing macOS Keychain service/account through Settings. Do not copy plaintext environment files between computers or replace production worker secrets to create a test token. Existing credential rotation, scope changes or production changes require explicit human approval.
 

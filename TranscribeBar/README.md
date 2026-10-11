@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0.6 adds a GPT-6 Luna formatting pass and removes paste-confirmation warnings from completed dictations. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. Notarized publication is pending the Apple notarization profile and final workflow verification. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
+Version 2.0.7 adds a day-grouped dictation history and actionable account/retry messages to the GPT-6 Luna formatting pass. The owner verified paragraph formatting on 2.0.6. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. Apple notarization credentials are now provisioned; packaging and final release verification are in progress. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
 
 ```bash
 cd TranscribeBar
@@ -12,7 +12,8 @@ cd TranscribeBar
 open build/Transcribe.app
 ```
 
-The app lives in the menu bar. Open Transcribe for history, meetings, dictionary and settings.
+The app lives in the menu bar. Open Transcribe opens Dictation history. Meetings,
+Dictionary and Settings are available in the sidebar.
 
 ## Connect
 
@@ -43,6 +44,20 @@ formatting is saved before insertion; the raw transcript remains in the local re
 The owner is validating formatting quality with real dictation. Dictionary terms
 remain optional recognition hints. Meetings, previews and CLI transcription do not
 use this second pass.
+
+Dictation history shows full selectable text grouped by day, with each recording's
+time and compact Copy/Actions controls. Custom titles can be renamed through Actions.
+Empty inactive recordings with no recovery or account action are hidden from the view;
+stored history and audio are retained.
+
+Service failures show one brief message with a useful action. Explicitly exhausted
+credits open OpenAI billing; spend/usage limits direct to billing, and Team account
+issues direct to Settings and the team administrator. Rate limits and temporary
+failures offer Retry. A transcription retry uses saved audio and cached successful
+chunks. A formatting retry uses only the saved raw text, preserves the previous text
+until the result is saved, and never inserts again automatically. Copy remains
+available when text was recognized. Escape cancels a formatting retry without
+discarding the saved transcript.
 
 ## Meetings
 

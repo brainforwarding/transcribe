@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
     enum Sidebar: String, CaseIterable { case dictation, meetings, dictionary, settings }
     enum ChipState: Equatable { case hidden, recording, warning, transcribing, inserted, ready, cancelled, failed, silent }
     enum KeyStatus: Equatable { case idle, checking, verified, rejected, savedUnverified }
+    enum ServiceAction: Equatable { case settings, billing, retryTranscription, retryFormatting }
+    struct ServiceNotice { let message: String; let buttonTitle: String; let action: ServiceAction? }
 
     /// The coordinator owns state; these operations isolate hardware, network and side effects.
     /// Tests supply controlled completions while exercising the same production commands.
@@ -37,7 +39,7 @@ final class AppModel: ObservableObject {
         var deliverAtCurrentCaret: (String, @escaping @MainActor () -> Bool) async -> PasteService.Outcome
         var copy: (String) -> Void
         var automaticTimer = true
-        var format: ((String, OpenAIConfig) async throws -> String)? = nil
+        var format: ((String, OpenAIConfig) async throws -> DictationFormatResult)? = nil
 
         @MainActor static func live() -> Operations {
             let paste = PasteService()
@@ -81,6 +83,7 @@ final class AppModel: ObservableObject {
     @Published var deliveryDetail = ""
     @Published var chipState: ChipState = .hidden
     @Published var chipVisible = false
+    @Published private(set) var formattingRecordID: UUID?
     @Published var shortcutAvailable = false
     @Published var lastTranscript: URL?
     @Published var mics: [MicDevice] = []
@@ -122,6 +125,8 @@ final class AppModel: ObservableObject {
     private var startupTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private var processingTask: Task<Void, Never>?
+    private var formattingTask: Task<Void, Never>?
+    private var formattingGeneration = UUID()
     private var previewTask: Task<Void, Never>?
     private var pendingPreview: PreviewWindow?
     private var previewDisabled = false
@@ -133,7 +138,7 @@ final class AppModel: ObservableObject {
     var selectedRecord: SessionRecord? { records.first { $0.id == selectedRecordID } }
     var activeRecord: SessionRecord? { records.first { $0.id == activeSessionID } }
     var lastRecordWithText: SessionRecord? { records.first { $0.kind == .dictation && $0.hasText } }
-    var isBusy: Bool { [.starting, .recording, .stopping, .transcribing].contains(phase) }
+    var isBusy: Bool { formattingRecordID != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) }
     var ready: Bool { micGranted && hasKey && consentAccepted && keyStatus != .checking && keyStatus != .rejected }
     var needsSetup: Bool { !ready }
     var micOnly: Bool { get { meetingMode == .inPerson } set { meetingMode = newValue ? .inPerson : .online } }
@@ -394,6 +399,7 @@ final class AppModel: ObservableObject {
         }
     }
     func cancelDictation() {
+        if formattingRecordID != nil { cancelFormattingRetry(); return }
         guard activeKind == .dictation, let id = activeSessionID, isBusy else { if activeKind == .meeting { chipVisible = false }; return }
         cancelledIDs.insert(id)
         _ = mutate(id) { $0.delivery = .cancelled; $0.status = .cancelled }; automaticDeliveryID = nil; setChip(.cancelled)
@@ -403,7 +409,8 @@ final class AppModel: ObservableObject {
     private func config() throws -> OpenAIConfig { try operations.credentials(connectionProvider) }
     private func process(id: UUID) {
         guard let r = records.first(where: { $0.id == id }), let store else { return }
-        guard mutate(id, { $0.status = .processing }) else { phase = .error; setChip(.failed); return }
+        let provider = connectionProvider
+        guard mutate(id, { $0.status = .processing; $0.serviceProviderID = provider.rawValue }) else { phase = .error; setChip(.failed); return }
         phase = .transcribing; if r.delivery != .cancelled { setChip(.transcribing) }
         processingTask = Task { [weak self] in
             guard let self else { return }
@@ -415,6 +422,7 @@ final class AppModel: ObservableObject {
                 guard self.mutate(id, {
                     $0.transcript = result.text; $0.segments = result.segments
                     if $0.kind == .dictation { $0.rawTranscript = result.text }
+                    $0.formattingFailure = nil
                     $0.transcriptionIssues = result.issues
                     $0.issues = ($0.captureIncomplete ? $0.issues : []) + result.issues.map(\.userMessage)
                     $0.status = result.complete && !$0.captureIncomplete ? .complete : .partial
@@ -427,8 +435,8 @@ final class AppModel: ObservableObject {
                     let formatted = try await format(raw.transcript, credentials)
                     guard self.activeSessionID == id else { return }
                     if !Task.isCancelled, !self.cancelledIDs.contains(id), self.activeRecord?.delivery != .cancelled,
-                       formatted != raw.transcript {
-                        guard self.mutate(id, { $0.transcript = formatted }) else {
+                       formatted.text != raw.transcript || formatted.failure != raw.formattingFailure {
+                        guard self.mutate(id, { $0.transcript = formatted.text; $0.formattingFailure = formatted.failure }) else {
                             self.phase = .error; self.setChip(.failed); return
                         }
                     }
@@ -467,8 +475,14 @@ final class AppModel: ObservableObject {
                     self.automaticDeliveryID = nil; self.phase = .done
                     self.setChip(.cancelled, dismissAfter: 12); return
                 }
-                _ = self.mutate(id) { $0.status = $0.delivery == .cancelled ? .cancelled : .failed; $0.issues.append("Transcription unavailable"); if $0.delivery == .eligible { $0.delivery = .ready } }
-                self.phase = .error; self.statusDetail = self.hasKey ? "Transcription unavailable" : "Add your " + self.connectionProvider.credentialLabel.lowercased()
+                let failure = (error as? ProviderError)?.failureKind ?? (error is AppFailure ? .invalidCredential : .unavailable)
+                _ = self.mutate(id) {
+                    $0.status = $0.delivery == .cancelled ? .cancelled : .failed
+                    $0.transcriptionIssues = [TranscriptionIssue(userMessage: "Transcription could not finish.", failureKind: failure)]
+                    $0.issues.append("Transcription could not finish.")
+                    if $0.delivery == .eligible { $0.delivery = .ready }
+                }
+                self.phase = .error
                 self.setChip(self.activeRecord?.delivery == .cancelled ? .cancelled : .failed, dismissAfter: 12)
             }
         }
@@ -499,6 +513,86 @@ final class AppModel: ObservableObject {
     }
     func recover(_ id: UUID) { retry(id) }
     func recoverCancelled() { if let id = activeSessionID { retry(id) } }
+    func canRetryFormatting(_ record: SessionRecord) -> Bool {
+        !isBusy && manualPasteTask == nil && keyStatus != .checking && record.kind == .dictation &&
+            record.status == .complete && record.formattingFailure != nil &&
+            !(record.rawTranscript ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && operations.format != nil
+    }
+    /// A historical text-only retry. It never touches capture, ASR, insertion or audio cleanup.
+    func retryFormatting(_ id: UUID) {
+        guard let record = records.first(where: { $0.id == id }), canRetryFormatting(record),
+              let raw = record.rawTranscript, let format = operations.format else { return }
+        let provider = connectionProvider
+        let generation = UUID(); formattingGeneration = generation; formattingRecordID = id
+        formattingTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.formattingGeneration == generation { self.formattingRecordID = nil; self.formattingTask = nil }
+            }
+            do {
+                let credentials = try self.operations.credentials(provider)
+                let result = try await format(raw, credentials)
+                guard !Task.isCancelled, self.formattingGeneration == generation, self.formattingRecordID == id,
+                      let current = self.records.first(where: { $0.id == id }),
+                      current.rawTranscript == record.rawTranscript, current.transcript == record.transcript,
+                      current.status == record.status else { return }
+                _ = self.mutate(id) {
+                    $0.transcript = result.text; $0.formattingFailure = result.failure; $0.serviceProviderID = provider.rawValue
+                }
+            } catch {
+                guard !Task.isCancelled, !(error is CancellationError), self.formattingGeneration == generation,
+                      self.formattingRecordID == id, let current = self.records.first(where: { $0.id == id }),
+                      current.rawTranscript == record.rawTranscript, current.transcript == record.transcript else { return }
+                _ = self.mutate(id) {
+                    $0.formattingFailure = (error as? ProviderError)?.failureKind ?? (error is AppFailure ? .invalidCredential : .unavailable)
+                    $0.serviceProviderID = provider.rawValue
+                }
+            }
+        }
+    }
+    func cancelFormattingRetry() { formattingTask?.cancel() }
+    func serviceNotice(for record: SessionRecord) -> ServiceNotice? {
+        let failures = record.transcriptionIssues.compactMap(\.failureKind)
+        let asrFailure = failures.first { $0.allowsRecoveryAfterRemedy || $0 == .invalidHints } ?? failures.first
+        guard let failure = asrFailure ?? record.formattingFailure else { return nil }
+        let formatting = asrFailure == nil
+        let prefix = formatting ? "Text saved. " : ""
+        let provider = record.serviceProviderID.flatMap(ConnectionProvider.init(rawValue:))
+        let retryAction: ServiceAction = formatting ? .retryFormatting : .retryTranscription
+        let retryTitle = "Retry"
+        switch failure {
+        case .invalidCredential:
+            return ServiceNotice(message: prefix + (provider == .team ? "Your team token was rejected." : provider == .openAI ? "Your API key was rejected." : "Your credential was rejected."), buttonTitle: "Check Settings", action: .settings)
+        case .accessDenied:
+            return ServiceNotice(message: prefix + "Your account cannot access this service.", buttonTitle: "Check access", action: .settings)
+        case .insufficientCredits, .billingLimit:
+            if provider == .openAI {
+                return ServiceNotice(message: prefix + (failure == .insufficientCredits ? "Your API credits are exhausted." : "An account or project limit was reached."), buttonTitle: failure == .insufficientCredits ? "Add credits" : "Check billing", action: .billing)
+            }
+            return ServiceNotice(message: prefix + (provider == .team ? "Your team service needs billing attention. Contact your administrator." : "The service account needs billing attention."), buttonTitle: "Settings", action: .settings)
+        case .rateLimited:
+            return ServiceNotice(message: prefix + "Too many requests. Try again shortly.", buttonTitle: "Retry", action: retryAction)
+        case .invalidHints:
+            return ServiceNotice(message: "Review your language and dictionary settings.", buttonTitle: "Settings", action: .settings)
+        case .tooLarge:
+            return ServiceNotice(message: "This recording could not be uploaded. Your audio is saved.", buttonTitle: "", action: nil)
+        case .unavailable, .invalidResponse, .storage:
+            return ServiceNotice(message: formatting ? "Text saved. Formatting could not finish." : "Transcription could not finish. Your recording is saved.", buttonTitle: retryTitle, action: retryAction)
+        }
+    }
+    func performServiceAction(_ action: ServiceAction, for id: UUID) {
+        guard !isBusy, manualPasteTask == nil, keyStatus != .checking, let record = records.first(where: { $0.id == id }) else { return }
+        switch action {
+        case .retryTranscription: retry(id)
+        case .retryFormatting: retryFormatting(id)
+        case .settings:
+            if let provider = record.serviceProviderID.flatMap(ConnectionProvider.init(rawValue:)) { setConnectionProvider(provider) }
+            showSettings?()
+        case .billing:
+            guard record.serviceProviderID == ConnectionProvider.openAI.rawValue else { showSettings?(); return }
+            NSWorkspace.shared.open(URL(string: "https://platform.openai.com/settings/organization/billing/overview")!)
+        }
+    }
     func regenerateNotes(_ id: UUID) { guard let r = records.first(where: { $0.id == id }), r.kind == .meeting, r.hasText else { return }; Task { do { await generateNotes(for: id, credentials: try config()) } catch { statusDetail = "Add your " + self.connectionProvider.credentialLabel.lowercased() } } }
     private func generateNotes(for id: UUID, credentials: OpenAIConfig) async {
         guard let r = records.first(where: { $0.id == id }), r.summaryStatus != .processing, mutate(id, { $0.summaryStatus = .processing }) else { return }
@@ -590,6 +684,7 @@ final class AppModel: ObservableObject {
     }
     func hideChip() { chipVisible = false }
     func prepareToQuit() async {
+        formattingTask?.cancel(); await formattingTask?.value
         if activeKind == .dictation, isBusy { cancelDictation() }
         if phase == .starting || phase == .recording { finishRecording() }
         await stopTask?.value; previewTask?.cancel(); processingTask?.cancel()

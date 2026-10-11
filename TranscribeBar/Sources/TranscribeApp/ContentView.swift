@@ -14,11 +14,11 @@ struct ContentView: View {
             else if model.sidebar == .dictionary { DictionaryView() }
             else if model.records.isEmpty && !model.ready { SetupView() }
             else if model.sidebar == .meetings && model.meetingSetupPresented && !model.isBusy { MeetingSetupView(onCancel: { model.meetingSetupPresented = false }) }
+            else if model.sidebar == .dictation { DictationHistoryView() }
             else {
                 history
-                if let record = model.selectedRecord {
-                    if record.kind == .meeting { MeetingWorkspaceView(record: record) }
-                    else { DictationDetailView(record: record) }
+                if let record = model.selectedRecord, record.kind == .meeting {
+                    MeetingWorkspaceView(record: record)
                 } else { emptyDetail }
             }
         }
@@ -126,34 +126,6 @@ struct HistoryRow: View {
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .background(selected ? DesignSystem.selected : Color.clear, in: RoundedRectangle(cornerRadius: 12))
             .contentShape(RoundedRectangle(cornerRadius: 12)).accessibilityElement(children: .combine)
-    }
-}
-
-struct DictationDetailView: View {
-    @EnvironmentObject var model: AppModel
-    let record: SessionRecord
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                EditableRecordTitle(record: record).id(record.id)
-                Text(record.startedAt.formatted(date: .abbreviated, time: .shortened) + " · " + duration(record.duration)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-                StatusPill(title: record.statusLabel, color: record.isPartial ? DesignSystem.warning : DesignSystem.muted, background: record.isPartial ? DesignSystem.warningBackground : DesignSystem.subtle)
-                if !record.issues.isEmpty && record.status != .complete { RecordIssuesView(record: record) }
-                Text(record.transcript.isEmpty ? record.preview : record.transcript).font(DesignSystem.font(16)).foregroundStyle(DesignSystem.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 12) {
-                    if record.hasText {
-                        Button("Copy") { model.copyTranscript(record.id) }.buttonStyle(CirclesButtonStyle(primary: true))
-                        Button("Export") { model.export(record.id) }.buttonStyle(CirclesButtonStyle())
-                    }
-                    if record.canRecover {
-                        Button(record.status == .cancelled ? "Recover" : "Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle(primary: !record.hasText))
-                    }
-                }
-                if record.hasText && model.pasteLastShortcutEnabled {
-                    HStack(spacing: 8) { StatusPill(title: "⌥ ⇧ V"); Text("Paste last dictation").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted) }
-                }
-            }.padding(32)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

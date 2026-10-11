@@ -59,7 +59,7 @@ private final class TranscriptionTests {
             XCTAssertTrue(messages[0]["content"]!.contains("Do not translate"))
             return (200, try self.formattedResponse(formatted))
         }
-        XCTAssertEqual(try await formatDictation(raw, config: config, session: transport), formatted)
+        XCTAssertEqual(try await formatDictation(raw, config: config, session: transport).text, formatted)
     }
     func testFormatterRejectsWordAccentNumericAndSymbolChanges() async throws {
         let cases = [
@@ -75,40 +75,90 @@ private final class TranscriptionTests {
         ]
         for (raw, changed) in cases {
             StubProtocol.handler = { _ in (200, try self.formattedResponse(changed)) }
-            XCTAssertEqual(try await formatDictation(raw, config: config, session: transport), raw)
+            let result = try await formatDictation(raw, config: config, session: transport)
+            XCTAssertEqual(result.text, raw); XCTAssertEqual(result.failure, nil)
         }
         let raw = "Año a-b don't -01.50 1,000 01/02 10:30 x + y = 5% €5 Hola hello não 2FA 3M 0xFF 1e-3 1.2v https://a.b/x"
         let unchanged = "Año, a-b, don't: -01.50, 1,000, 01/02, 10:30.\n\nx + y = 5% €5. Hola hello não!\n\n2FA, 3M, 0xFF, 1e-3, 1.2v, https://a.b/x."
         StubProtocol.handler = { _ in (200, try self.formattedResponse(unchanged)) }
-        XCTAssertEqual(try await formatDictation(raw, config: config, session: transport), unchanged)
+        XCTAssertEqual(try await formatDictation(raw, config: config, session: transport).text, unchanged)
         let spanish = "Qué quieres Tomás dijo quiero comer claro"
         let spanishFormatted = "¿Qué quieres? Tomás dijo: «Quiero comer». ¡Claro!"
         StubProtocol.handler = { _ in (200, try self.formattedResponse(spanishFormatted)) }
-        XCTAssertEqual(try await formatDictation(spanish, config: config, session: transport), spanishFormatted)
+        XCTAssertEqual(try await formatDictation(spanish, config: config, session: transport).text, spanishFormatted)
     }
     func testFormatterFallsBackOnProviderAndResponseFailures() async throws {
         let raw = "Keep the exact raw text"
         for status in [401, 403, 429, 500] {
             StubProtocol.handler = { _ in (status, Data("private provider failure".utf8)) }
-            XCTAssertEqual(try await formatDictation(raw, config: config, session: transport), raw)
+            XCTAssertEqual(try await formatDictation(raw, config: config, session: transport).text, raw)
         }
         for response in [Data("invalid".utf8), try formattedResponse(""), try formattedResponse(raw, finish: "length"),
                          Data(#"{"choices":[{"finish_reason":"stop","message":{"content":null}}]}"#.utf8)] {
             StubProtocol.handler = { _ in (200, response) }
-            XCTAssertEqual(try await formatDictation(raw, config: config, session: transport), raw)
+            XCTAssertEqual(try await formatDictation(raw, config: config, session: transport).text, raw)
         }
         StubProtocol.handler = { _ in throw URLError(.timedOut) }
-        XCTAssertEqual(try await formatDictation(raw, config: config, session: transport), raw)
+        XCTAssertEqual(try await formatDictation(raw, config: config, session: transport).text, raw)
+    }
+    func testProviderClassifiesOnlySafeStructuredCodes() async throws {
+        let cases: [(Int, String, ProviderError)] = [
+            (429, #"{"error":{"code":"credit_balance_exhausted","message":"NEVER_ECHO"}}"#, .insufficientCredits),
+            (429, #"{"error":{"code":"project_spend_limit_exceeded"}}"#, .billingLimit),
+            (429, #"{"error":{"code":"organization_spend_limit_exceeded"}}"#, .billingLimit),
+            (429, #"{"error":{"code":"organization_usage_limit_exceeded"}}"#, .billingLimit),
+            (429, #"{"error":{"code":"insufficient_quota"}}"#, .billingLimit),
+            (429, #"{"error":{"type":"insufficient_quota"}}"#, .billingLimit),
+            (429, #"{"error":{"code":"rate_limit_exceeded","type":"insufficient_quota"}}"#, .quota),
+            (429, #"{"error":{"code":"slow_down","type":"insufficient_quota"}}"#, .quota),
+            (429, #"{"error":"rate limit exceeded"}"#, .quota),
+            (429, #"{"error":{"message":"out of credits NEVER_ECHO"}}"#, .quota),
+            (401, #"{"error":{"message":"NEVER_ECHO"}}"#, .authentication),
+            (403, #"{"error":"model not allowed"}"#, .accessDenied),
+            (503, #"{"error":{"message":"NEVER_ECHO"}}"#, .unavailable),
+            (429, String(repeating: " ", count: 16_385) + #"{"error":{"code":"credit_balance_exhausted"}}"#, .quota)
+        ]
+        let input = try audio()
+        for (status, body, expected) in cases {
+            StubProtocol.handler = { _ in (status, Data(body.utf8)) }
+            do { _ = try await requestAudioTranscript(fileURL: input, model: .text, config: config, session: transport); XCTFail("Expected classified failure") }
+            catch let error as ProviderError {
+                XCTAssertEqual(error, expected); XCTAssertFalse(error.localizedDescription.contains("NEVER_ECHO"))
+            }
+            let result = try await formatDictation("Keep text", config: config, session: transport)
+            XCTAssertEqual(result.text, "Keep text"); XCTAssertEqual(result.failure, expected.failureKind)
+        }
+        StubProtocol.handler = { _ in (200, try self.formattedResponse("Keep text")) }
+        XCTAssertEqual(try await formatDictation("Keep text", config: config, session: transport).failure, nil)
+        StubProtocol.handler = { _ in throw URLError(.timedOut) }
+        XCTAssertEqual(try await formatDictation("Keep text", config: config, session: transport).failure, .unavailable)
+    }
+    func testAccountFailuresRetainTypedAudioRecoveryAndLegacyDecode() async throws {
+        let source = try wav(name: "account.wav", value: 0.2, seconds: 0.5)
+        StubProtocol.handler = { _ in (401, Data(#"{"error":{"code":"invalid_api_key"}}"#.utf8)) }
+        let tracks = [SessionAudioTrack(source: .mic, spans: [AudioSpan(url: source, offset: 0, duration: 0.5)])]
+        let result = try await transcribeFinal(tracks: tracks, kind: .dictation,
+            chunkDir: folder.appendingPathComponent("account-chunks"), config: config, session: transport)
+        XCTAssertFalse(result.complete); XCTAssertEqual(result.issues.first?.failureKind, .invalidCredential)
+        var record = SessionRecord(kind: .dictation, title: "Synthetic")
+        record.status = .partial; record.tracks = tracks; record.transcriptionIssues = result.issues
+        XCTAssertTrue(record.canRecover)
+        let encoded = try JSONEncoder().encode(record)
+        XCTAssertEqual(try JSONDecoder().decode(SessionRecord.self, from: encoded).transcriptionIssues.first?.failureKind, .invalidCredential)
+        let legacy = Data(#"{"userMessage":"Legacy issue","retryable":false}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(TranscriptionIssue.self, from: legacy).failureKind, nil)
+        record.transcriptionIssues = [TranscriptionIssue(userMessage: "Gap", retryable: false)]
+        XCTAssertFalse(record.canRecover)
     }
     func testFormatterCancellationPropagatesAndBlankSkipsRequest() async throws {
         var requests = 0
         StubProtocol.handler = { _ in requests += 1; throw URLError(.cancelled) }
-        XCTAssertEqual(try await formatDictation(" \n", config: config, session: transport), " \n")
+        XCTAssertEqual(try await formatDictation(" \n", config: config, session: transport).text, " \n")
         XCTAssertEqual(requests, 0)
         do { _ = try await formatDictation("Keep text", config: config, session: transport); XCTFail("Expected cancellation") }
         catch is CancellationError {} catch { XCTFail("Wrong cancellation error") }
         XCTAssertEqual(requests, 1)
-        let task = Task { () throws -> String in
+        let task = Task { () throws -> DictationFormatResult in
             withUnsafeCurrentTask { $0?.cancel() }
             return try await formatDictation("Keep text", config: config, session: transport)
         }
@@ -476,6 +526,8 @@ public func runTranscriptionSelftests() async -> Bool {
         ("formatter ordered fidelity guard", tests.testFormatterRejectsWordAccentNumericAndSymbolChanges),
         ("formatter provider and response fallback", tests.testFormatterFallsBackOnProviderAndResponseFailures),
         ("formatter cancellation and blank input", tests.testFormatterCancellationPropagatesAndBlankSkipsRequest),
+        ("safe credit billing rate and access classification", tests.testProviderClassifiesOnlySafeStructuredCodes),
+        ("typed account recovery and legacy issue decode", tests.testAccountFailuresRetainTypedAudioRecoveryAndLegacyDecode),
         ("dictation format", tests.testDictationUsesCurrentTextModelAndPluralHintsWithoutInventedSegments),
         ("diarization format", tests.testDiarizationUsesSupportedFieldsAndRealTimes),
         ("dictionary validation", tests.testInvalidDictionaryHintIsRejectedBeforeHTTP),

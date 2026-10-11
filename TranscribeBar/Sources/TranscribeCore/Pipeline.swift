@@ -142,14 +142,14 @@ public func transcribeFinal(tracks: [SessionAudioTrack], kind: TranscriptionKind
                     let provider = error as? ProviderError
                     issues.append(TranscriptionIssue(source: track.source, spanID: chunk.url.lastPathComponent,
                         userMessage: provider?.localizedDescription ?? "An audio section could not be transcribed. The recording is kept.",
-                        retryable: provider?.retryable ?? true))
-                    if provider == .authentication || provider == .quota { break }
+                        retryable: provider?.retryable ?? true, failureKind: provider?.failureKind ?? .unavailable))
+                    if provider == .authentication || provider == .accessDenied || provider == .quota || provider == .insufficientCredits || provider == .billingLimit { break }
                 }
             }
         } catch is CancellationError { throw CancellationError() }
         catch {
             issues.append(TranscriptionIssue(source: track.source,
-                userMessage: "A captured audio source could not be read. The recording is kept.", retryable: true))
+                userMessage: "A captured audio source could not be read. The recording is kept.", retryable: true, failureKind: .storage))
         }
     }
     turns.sort { a, b in

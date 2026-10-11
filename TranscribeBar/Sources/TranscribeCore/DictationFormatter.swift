@@ -5,9 +5,10 @@ private let formattingLog = Logger(subsystem: "app.transcribe", category: "dicta
 
 /// A punctuation-only second pass. Provider failures keep the exact durable transcript.
 public func formatDictation(_ raw: String, config: OpenAIConfig,
-                            session: URLSession = .shared) async throws -> String {
+                            session: URLSession = .shared) async throws -> DictationFormatResult {
     try Task.checkCancellation()
-    guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, config.hasKey else { return raw }
+    guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return DictationFormatResult(text: raw) }
+    guard config.hasKey else { return DictationFormatResult(text: raw, failure: .invalidCredential) }
     var request = URLRequest(url: config.baseURL.appendingPathComponent("chat/completions"))
     request.httpMethod = "POST"
     request.timeoutInterval = 9
@@ -27,23 +28,26 @@ public func formatDictation(_ raw: String, config: OpenAIConfig,
     do {
         let (data, response) = try await session.data(for: request)
         try Task.checkCancellation()
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
+            return DictationFormatResult(text: raw, failure: .invalidResponse)
+        }
+        guard (200..<300).contains(http.statusCode) else {
             formattingLog.notice("gpt-6-luna fallback: HTTP")
-            return raw
+            return DictationFormatResult(text: raw, failure: classifiedProviderError(status: http.statusCode, body: data).failureKind ?? .unavailable)
         }
         let decoded = try JSONDecoder().decode(FormattingResponse.self, from: data)
         guard decoded.choices.count == 1, let choice = decoded.choices.first,
               choice.finishReason == "stop", let text = choice.message.content,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             formattingLog.notice("gpt-6-luna fallback: invalid response")
-            return raw
+            return DictationFormatResult(text: raw, failure: .invalidResponse)
         }
         guard formattingTokens(raw) == formattingTokens(text) else {
             formattingLog.notice("gpt-6-luna fallback: fidelity")
-            return raw
+            return DictationFormatResult(text: raw)
         }
         formattingLog.notice("gpt-6-luna accepted")
-        return text
+        return DictationFormatResult(text: text)
     } catch {
         if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
             throw CancellationError()
@@ -51,7 +55,7 @@ public func formatDictation(_ raw: String, config: OpenAIConfig,
         if (error as? URLError)?.code == .timedOut { formattingLog.notice("gpt-6-luna fallback: timeout") }
         else if error is DecodingError { formattingLog.notice("gpt-6-luna fallback: invalid response") }
         else { formattingLog.notice("gpt-6-luna fallback: transport") }
-        return raw
+        return DictationFormatResult(text: raw, failure: error is DecodingError ? .invalidResponse : .unavailable)
     }
 }
 

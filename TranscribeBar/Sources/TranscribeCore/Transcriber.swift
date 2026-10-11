@@ -47,12 +47,15 @@ public struct OpenAIConfig: Sendable {
 
 /// Errors never contain response bodies, credentials, provider URLs, or transcript text.
 public enum ProviderError: Error, LocalizedError, Sendable, Equatable {
-    case authentication, quota, tooLarge, unavailable, invalidResponse, invalidHints, cancelled, cacheWrite
+    case authentication, accessDenied, insufficientCredits, billingLimit, quota, tooLarge, unavailable, invalidResponse, invalidHints, cancelled, cacheWrite
     case rejected(Int)
     public var errorDescription: String? {
         switch self {
-        case .authentication: return "The team token was rejected. Update it in Settings."
-        case .quota: return "The transcription service limit was reached. Try again later."
+        case .authentication: return "Your key was rejected. Check it in Settings."
+        case .accessDenied: return "Your account cannot access this service. Check Settings."
+        case .insufficientCredits: return "The service account is out of API credits."
+        case .billingLimit: return "An account or project limit was reached. Check billing."
+        case .quota: return "Too many requests. Try again shortly."
         case .tooLarge: return "The audio part exceeds the service upload limit."
         case .unavailable: return "The transcription service is unavailable. Your recording is kept."
         case .invalidResponse: return "The service returned an unreadable transcript. Try again."
@@ -63,7 +66,7 @@ public enum ProviderError: Error, LocalizedError, Sendable, Equatable {
         }
     }
     public var retryable: Bool {
-        switch self { case .authentication, .invalidHints, .tooLarge: return false; default: return true }
+        switch self { case .authentication, .accessDenied, .invalidHints, .tooLarge: return false; default: return true }
     }
 }
 
@@ -163,14 +166,8 @@ func providerData(_ request: URLRequest, session: URLSession) async throws -> Da
     do {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ProviderError.invalidResponse }
-        switch http.statusCode {
-        case 200..<300: return data
-        case 401, 403: throw ProviderError.authentication
-        case 413: throw ProviderError.tooLarge
-        case 429: throw ProviderError.quota
-        case 500...599: throw ProviderError.unavailable
-        default: throw ProviderError.rejected(http.statusCode)
-        }
+        if (200..<300).contains(http.statusCode) { return data }
+        throw classifiedProviderError(status: http.statusCode, body: data)
     } catch let error as ProviderError { throw error }
     catch is CancellationError { throw ProviderError.cancelled }
     catch let error as URLError where error.code == .cancelled { throw ProviderError.cancelled }
