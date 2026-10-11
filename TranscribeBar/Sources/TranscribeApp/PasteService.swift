@@ -8,6 +8,19 @@ struct PasteTargetPolicy {
               subrole != kAXSecureTextFieldSubrole, protected != true, enabled != false else { return false }
         return explicitEditable ?? (selectedTextWritable || valueWritable)
     }
+
+    static func isTerminalInput(role: String?, subrole: String?, protected: Bool?, enabled: Bool?, hasFocusedWindow: Bool) -> Bool {
+        hasFocusedWindow && role == kAXTextAreaRole && subrole != kAXSecureTextFieldSubrole && protected != true && enabled != false
+    }
+
+    /// Only the terminal delivery payload changes; saved transcripts and explicit Copy stay intact.
+    static func terminalPayload(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
+            let value = scalar.value
+            return value <= 0x1F || (0x7F...0x9F).contains(value) || value == 0x2028 || value == 0x2029
+                ? UnicodeScalar(0x20)! : scalar
+        }))
+    }
 }
 
 /// A temporary clipboard replacement. Data stays in memory and is never logged.
@@ -83,7 +96,7 @@ final class CurrentCaretPasteTransaction {
     }) { self.board = board; self.wait = wait }
 
     func run(_ text: String, canDeliver: () -> Bool, targetStillValid: () -> Bool,
-             postPaste: () -> Void, verify: () -> Bool) async -> PasteService.Outcome {
+             postPaste: () -> Void, verify: () -> Bool, terminal: Bool = false) async -> PasteService.Outcome {
         guard !delivering else { return .unconfirmed(reason: "A paste is already in progress. Check the field before pasting again.") }
         delivering = true
         defer { delivering = false }
@@ -107,11 +120,16 @@ final class CurrentCaretPasteTransaction {
         }
         postPaste()
         for _ in 0..<20 {
-            if verify() { clipboard.restoreIfOwned(); return .inserted }
+            if !terminal && verify() { clipboard.restoreIfOwned(); return .inserted }
             // Cancellation must not restore old contents before a delayed receiver consumes Cmd-V.
             await wait()
         }
         // Without confirmation, retaining the transcript avoids a late paste of unrelated old data.
+        if terminal {
+            return .unconfirmed(reason: clipboard.isOwned
+                ? "The paste shortcut was sent as one line. Check the terminal. That line remains on the clipboard."
+                : "The paste shortcut was sent as one line. Check the terminal before pasting again. Your transcript is saved.")
+        }
         return .unconfirmed(reason: clipboard.isOwned
             ? "Paste could not be confirmed. Check the field. The transcript remains on the clipboard."
             : "Paste could not be confirmed. Check the field before pasting again. Your transcript is saved.")
@@ -136,6 +154,7 @@ final class PasteService {
     private struct CurrentTarget {
         let processID: pid_t
         let element: AXUIElement
+        let terminalWindow: AXUIElement?
         let initialValue: String?
         let initialRange: CFRange?
     }
@@ -149,11 +168,15 @@ final class PasteService {
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
             return .ready(reason: "Select an editable text field in another app.")
         }
-        guard !Self.terminalBundleIDs.contains(app.bundleIdentifier ?? "") else {
-            return .ready(reason: "Terminal pasting is not supported. Your transcript is saved.")
-        }
-        guard let element = focusedElement(in: app.processIdentifier), isPasteEditable(element) else {
+        let terminal = Self.terminalBundleIDs.contains(app.bundleIdentifier ?? "")
+        let terminalWindow = terminal ? focusedWindow(in: app.processIdentifier) : nil
+        guard let element = focusedElement(in: app.processIdentifier),
+              terminal ? isTerminalInput(element, hasFocusedWindow: terminalWindow != nil) : isPasteEditable(element) else {
             return .ready(reason: "The current field does not expose safe text editing. Select an editable text field.")
+        }
+        let payload = terminal ? PasteTargetPolicy.terminalPayload(text) : text
+        guard !terminal || !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .ready(reason: "No text to paste.")
         }
 #if TRANSCRIBE_INSERTION_DIAGNOSTICS
         if let required = diagnosticTarget,
@@ -161,11 +184,11 @@ final class PasteService {
             return .ready(reason: "The controlled fixture target changed.")
         }
 #endif
-        let value = stringAttribute(element, kAXValueAttribute)
-        let range = selectedRange(element).flatMap { range in value.map { valid(range, in: $0) ? range : nil } ?? nil }
-        let target = CurrentTarget(processID: app.processIdentifier, element: element, initialValue: value, initialRange: range)
-        let expected = value.flatMap { value in range.map { (value as NSString).replacingCharacters(in: NSRange(location: $0.location, length: $0.length), with: text) } }
-        let expectedCaret = range.map { CFRange(location: $0.location + (text as NSString).length, length: 0) }
+        let value = terminal ? nil : stringAttribute(element, kAXValueAttribute)
+        let range = terminal ? nil : selectedRange(element).flatMap { range in value.map { valid(range, in: $0) ? range : nil } ?? nil }
+        let target = CurrentTarget(processID: app.processIdentifier, element: element, terminalWindow: terminalWindow, initialValue: value, initialRange: range)
+        let expected = value.flatMap { value in range.map { (value as NSString).replacingCharacters(in: NSRange(location: $0.location, length: $0.length), with: payload) } }
+        let expectedCaret = range.map { CFRange(location: $0.location + (payload as NSString).length, length: 0) }
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else {
@@ -173,11 +196,14 @@ final class PasteService {
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
-        return await currentCaretTransaction.run(text, canDeliver: canDeliver, targetStillValid: {
+        return await currentCaretTransaction.run(payload, canDeliver: canDeliver, targetStillValid: {
             guard AXIsProcessTrusted(), CGPreflightPostEventAccess(),
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processID,
                   let focused = self.focusedElement(in: target.processID), CFEqual(focused, target.element),
-                  self.isPasteEditable(focused) else { return false }
+                  terminal ? self.isTerminalInput(focused, hasFocusedWindow: target.terminalWindow != nil) : self.isPasteEditable(focused) else { return false }
+            if let window = target.terminalWindow {
+                guard let current = self.focusedWindow(in: target.processID), CFEqual(window, current) else { return false }
+            }
             if let value = target.initialValue, self.stringAttribute(focused, kAXValueAttribute) != value { return false }
             if let range = target.initialRange {
                 guard let current = self.selectedRange(focused), self.same(current, range) else { return false }
@@ -191,7 +217,7 @@ final class PasteService {
                   self.stringAttribute(target.element, kAXValueAttribute) == expected,
                   let range = self.selectedRange(target.element), self.same(range, expectedCaret) else { return false }
             return true
-        })
+        }, terminal: terminal)
     }
 
     private static let terminalBundleIDs: Set<String> = [
@@ -215,6 +241,26 @@ final class PasteService {
             protected: boolAttribute("AXProtectedContent"), enabled: boolAttribute(kAXEnabledAttribute),
             explicitEditable: boolAttribute("AXEditable"), selectedTextWritable: writable(kAXSelectedTextAttribute),
             valueWritable: writable(kAXValueAttribute))
+    }
+
+    private func isTerminalInput(_ element: AXUIElement, hasFocusedWindow: Bool) -> Bool {
+        PasteTargetPolicy.isTerminalInput(role: stringAttribute(element, kAXRoleAttribute),
+            subrole: stringAttribute(element, kAXSubroleAttribute),
+            protected: boolAttribute(element, "AXProtectedContent"), enabled: boolAttribute(element, kAXEnabledAttribute), hasFocusedWindow: hasFocusedWindow)
+    }
+
+    private func boolAttribute(_ element: AXUIElement, _ name: String) -> Bool? {
+        var result: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success else { return nil }
+        return result as? Bool
+    }
+
+    private func focusedWindow(in processID: pid_t) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(processID)
+        var result: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &result) == .success,
+              let result, CFGetTypeID(result) == AXUIElementGetTypeID() else { return nil }
+        return (result as! AXUIElement)
     }
 
     func copy(_ text: String) {

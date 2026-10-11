@@ -169,6 +169,23 @@ struct NativeSelftest {
         check(!editable(kAXTextAreaRole, nil, nil, true, nil, false), "Selectable text alone is not editable")
         check(!editable("AXWebArea"), "Web container cannot receive a paste")
         check(editable(kAXTextFieldRole, nil, nil, true, true, false), "Explicit editability is accepted without AX setter")
+        func terminal(_ role: String? = kAXTextAreaRole, _ subrole: String? = nil,
+                      _ protected: Bool? = nil, _ enabled: Bool? = true, _ window: Bool = true) -> Bool {
+            PasteTargetPolicy.isTerminalInput(role: role, subrole: subrole, protected: protected,
+                enabled: enabled, hasFocusedWindow: window)
+        }
+        check(terminal(), "Known-terminal text area requires no writable scrollback attribute")
+        check(!terminal(kAXGroupRole) && !terminal(kAXWindowRole) && !terminal(nil), "Terminal group/window/missing focus is rejected")
+        check(!terminal(kAXTextAreaRole, kAXSecureTextFieldSubrole), "Secure terminal field is rejected")
+        check(!terminal(kAXTextAreaRole, nil, true), "Protected terminal field is rejected")
+        check(!terminal(kAXTextAreaRole, nil, nil, false), "Disabled terminal field is rejected")
+        check(!terminal(kAXTextAreaRole, nil, nil, true, false), "Terminal without focused window is rejected")
+        let controls = String(String.UnicodeScalarView((Array(0...0x1F) + Array(0x7F...0x9F) + [0x2028, 0x2029]).map { UnicodeScalar($0)! }))
+        check(PasteTargetPolicy.terminalPayload(controls).unicodeScalars.allSatisfy { $0.value == 0x20 }, "Every C0/C1/DEL and Unicode line separator becomes space")
+        let prose = "Hola Sebastián 👩🏽‍💻 café.\r\nSecond\tline\u{1B}[31m"
+        let oneLine = PasteTargetPolicy.terminalPayload(prose)
+        check(oneLine == "Hola Sebastián 👩🏽‍💻 café.  Second line [31m", "Accents/emoji/prose stay intact while delivery controls are removed")
+        check(PasteTargetPolicy.terminalPayload(controls).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "Control-only payload becomes empty delivery")
 
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
@@ -242,5 +259,33 @@ struct NativeSelftest {
         else { check(false, "Overlapping delivery must be blocked") }
         blocked?.resume()
         _ = await first.value
+
+        let beforeTerminal = posts
+        let terminalSent = await engine.run(oneLine, canDeliver: { true }, targetStillValid: { true },
+            postPaste: { posts += 1 }, verify: { true }, terminal: true)
+        if case .unconfirmed(let reason) = terminalSent {
+            check(posts == beforeTerminal + 1 && board.string(forType: .string) == oneLine && reason.contains("sent as one line"),
+                  "Terminal dispatch never claims verification or restores unrelated old clipboard")
+        } else { check(false, "Terminal dispatch must remain unconfirmed") }
+        let beforeTerminalCancel = posts
+        let terminalCancelled = await engine.run(oneLine, canDeliver: { false }, targetStillValid: { true },
+            postPaste: { posts += 1 }, verify: { false }, terminal: true)
+        if case .ready = terminalCancelled { check(posts == beforeTerminalCancel && board.string(forType: .string) == oneLine, "Cancelled terminal delivery sends no keys") }
+        else { check(false, "Cancelled terminal delivery must be ready") }
+        var terminalIdentityChecks = 0
+        let terminalChanged = await engine.run(oneLine, canDeliver: { true }, targetStillValid: {
+            terminalIdentityChecks += 1; return terminalIdentityChecks < 3
+        }, postPaste: { posts += 1 }, verify: { false }, terminal: true)
+        if case .ready = terminalChanged { check(posts == beforeTerminalCancel && board.string(forType: .string) == oneLine, "Terminal focus/window invalidation before post sends no keys and restores clipboard") }
+        else { check(false, "Changed terminal destination must be ready") }
+        let terminalNewCopy = await newOwnerEngine.run(oneLine, canDeliver: { true }, targetStillValid: { true },
+            postPaste: { posts += 1 }, verify: { false }, terminal: true)
+        if case .unconfirmed(let reason) = terminalNewCopy { check(!reason.contains("remains on the clipboard") && board.string(forType: .string) == "newer clipboard", "Terminal wait preserves external clipboard owner") }
+        else { check(false, "Unverifiable terminal paste remains unconfirmed") }
+        let ordinaryText = "First paragraph\n\nSecond\tparagraph 👩🏽‍💻"
+        let ordinarySent = await engine.run(ordinaryText, canDeliver: { true }, targetStillValid: { true }, postPaste: {
+            check(board.string(forType: .string) == ordinaryText, "Ordinary editors retain exact multiline formatting")
+        }, verify: { true })
+        check(ordinarySent == .inserted, "Ordinary editor confirmation behavior is unchanged")
     }
 }
