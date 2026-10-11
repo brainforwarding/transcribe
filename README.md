@@ -2,7 +2,7 @@
 
 A Mac app that turns speech into text. Use it to dictate into any app, or to record a meeting and get a transcript and notes.
 
-**[Download Transcribe 2.0.9 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.9/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
+**[Download Transcribe 2.0.10 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.10/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
 
 ## Dictation
 
