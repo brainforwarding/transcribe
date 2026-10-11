@@ -23,6 +23,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var notes: String
     public var preview: String
     public var transcript: String
+    public var rawTranscript: String?
     public var segments: [Segment]
     public var summary: String
     public var summaryStatus: SummaryStatus
@@ -46,7 +47,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         self.title = title; self.startedAt = startedAt; self.language = language
         self.keywords = keywords; duration = 0; status = .starting
         delivery = kind == .dictation ? .eligible : .never
-        notes = ""; preview = ""; transcript = ""; segments = []
+        notes = ""; preview = ""; transcript = ""; rawTranscript = nil; segments = []
         summary = ""; summaryStatus = .none; summaryEvidenceIDs = []; summaryEvidence = []; summaryNotesSnapshot = ""
         issues = []; transcriptionIssues = []; tracks = []; captureIncomplete = false
         exportURL = nil; importURL = nil; imported = false
@@ -61,7 +62,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var hasText: Bool { !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private enum CodingKeys: String, CodingKey {
-        case id, kind, meetingMode, title, startedAt, duration, status, delivery, notes, preview, transcript,
+        case id, kind, meetingMode, title, startedAt, duration, status, delivery, notes, preview, transcript, rawTranscript,
              segments, summary, summaryStatus, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
              issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords
     }
@@ -79,6 +80,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         notes = try v.decodeIfPresent(String.self, forKey: .notes) ?? ""
         preview = try v.decodeIfPresent(String.self, forKey: .preview) ?? ""
         transcript = try v.decodeIfPresent(String.self, forKey: .transcript) ?? ""
+        rawTranscript = try v.decodeIfPresent(String.self, forKey: .rawTranscript)
         segments = try v.decodeIfPresent([Segment].self, forKey: .segments) ?? []
         summary = try v.decodeIfPresent(String.self, forKey: .summary) ?? ""
         summaryStatus = try v.decodeIfPresent(SummaryStatus.self, forKey: .summaryStatus) ?? .none

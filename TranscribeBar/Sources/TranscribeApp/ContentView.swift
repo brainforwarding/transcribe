@@ -138,7 +138,7 @@ struct DictationDetailView: View {
                 EditableRecordTitle(record: record).id(record.id)
                 Text(record.startedAt.formatted(date: .abbreviated, time: .shortened) + " · " + duration(record.duration)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
                 StatusPill(title: record.statusLabel, color: record.isPartial ? DesignSystem.warning : DesignSystem.muted, background: record.isPartial ? DesignSystem.warningBackground : DesignSystem.subtle)
-                if !record.issues.isEmpty { RecordIssuesView(record: record) }
+                if !record.issues.isEmpty && record.status != .complete { RecordIssuesView(record: record) }
                 Text(record.transcript.isEmpty ? record.preview : record.transcript).font(DesignSystem.font(16)).foregroundStyle(DesignSystem.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 12) {
                     if record.hasText {

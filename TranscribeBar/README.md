@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Run from source
 
-Version 2.0.5 passes local signed-app validation and adds conservative dictation formatting. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. Notarized publication is pending the Apple notarization profile. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
+Version 2.0.6 adds a GPT-6 Luna formatting pass and removes paste-confirmation warnings from completed dictations. Automatic paste was physically verified in Gmail in Chrome and in Terminal without submission on 2.0.4; that paste code is unchanged. Notarized publication is pending the Apple notarization profile and final workflow verification. Live direct-OpenAI workflows still need validation with an authorized user's key. Do not use GitHub's `/releases/latest` link to select a Mac installer; Windows releases share this repository.
 
 ```bash
 cd TranscribeBar
@@ -34,7 +34,15 @@ Audio is sent to OpenAI. Recordings, personal notes and history stay on this Mac
 - Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.
 - Option–Shift–V pastes the last dictation at the current editable cursor. Disable this shortcut in Settings if needed. The menu and history also provide copy actions.
 
-Dictation uses `gpt-transcribe`. Its final transcription request includes a conservative formatting prompt for punctuation, paragraphs and quotation marks around clear direct speech. It preserves the spoken wording, languages, tone, names, numbers, negations and uncertainty; it does not summarize or answer dictated instructions. Formatting is model guidance and may vary. Dictionary terms remain optional recognition hints. Meetings, previews and legacy Whisper transcription do not use this dictation policy.
+Dictation uses `gpt-transcribe`, with its existing conservative transcription prompt.
+After saving the raw transcript, the native app uses `gpt-6-luna` with
+`reasoning_effort: none` for paragraphs, punctuation and quotation marks around clear
+direct speech. An ordered fidelity check rejects changed words, accents, numbers or
+technical symbols. Provider failures and timeouts keep the original text. Accepted
+formatting is saved before insertion; the raw transcript remains in the local record.
+The owner is validating formatting quality with real dictation. Dictionary terms
+remain optional recognition hints. Meetings, previews and CLI transcription do not
+use this second pass.
 
 ## Meetings
 

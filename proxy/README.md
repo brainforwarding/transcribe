@@ -1,10 +1,9 @@
 # Transcribe proxy (shared-key, team tokens)
 
 This Cloudflare Worker holds the **shared org OpenAI key** so it never ships on coworkers'
-machines. Each team member gets a **personal token**; they paste it into the app exactly
-where an OpenAI key would go, and the Worker swaps it for the org key server-side. Revoking
-a person = removing their token. **Optional:** the app also works with a per-user OpenAI
-key (set `Config.proxyBaseURL = nil` and rebuild).
+machines. Each team member enters a **personal token** in Settings → Connection → Team,
+and the Worker swaps it for the org key server-side. A person can also choose OpenAI
+and enter their own API key without rebuilding the app.
 
 ## Deploy (~10 min, one-time)
 
@@ -36,9 +35,10 @@ Generate one random token per person and join them as `name:token,name:token`:
 openssl rand -hex 16        # one per person
 ```
 
-Keep the human-readable list in `proxy/TEAM_TOKENS.local` (gitignored). Each person pastes
-*their token* into the app's key field (⚙ → Replace key). The name is only used for
-per-person rate-limiting.
+Keep tokens canonically in 1Password; `proxy/TEAM_TOKENS.local` is a legacy gitignored
+working copy. Each person enters their token in Settings → Connection → Team. The name
+is only used for per-person rate-limiting. Existing credentials must not be rotated or
+replaced without the owner's explicit authorization.
 
 - **Add/rename/remove a person:** edit the list, re-run `wrangler secret put TEAM_TOKENS`
   with the new combined value (takes effect in seconds, no redeploy).
@@ -50,7 +50,9 @@ per-person rate-limiting.
 
 - Exactly two endpoints (`/v1/audio/transcriptions`, `/v1/chat/completions`); everything else 403.
 - All inbound headers stripped; the org key is injected server-side only.
-- Chat models allowlisted (`gpt-4o`, `gpt-4o-mini`); 25 MiB body cap.
+- Chat models allowlisted (`gpt-4o`, `gpt-4o-mini`, `gpt-6-luna`); 25 MiB body cap.
+  Native dictation uses Luna with `reasoning_effort: none` for its punctuation and
+  paragraph pass. Meeting summaries retain their existing models.
 - Per-person hourly rate limit (`RATE_PER_HOUR`, default 120) keyed by the token owner.
 - Constant-time token comparison; audio bodies are streamed, never read or logged; errors
   are sanitized — neither the key nor tokens are ever echoed.

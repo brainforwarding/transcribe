@@ -81,6 +81,17 @@ private final class Fixture {
     let startup = Gate()
     let processing = Gate()
     let delivery = Gate()
+    let formatting = Gate()
+    var formatterEnabled = false
+    var blocksFormatting = false
+    var formattingCancelled = false
+    var formatterRequests = 0
+    var rawSavedBeforeFormatting = false
+    var formattedSaveFails = false
+    var cancellationSaveFails = false
+    var formattedText = "Saved speech."
+    var finalText = "Saved speech"
+    var finalComplete = true
     var blocksDelivery = false
     var currentFocus = "Field A"
     var deliveredFocus: String?
@@ -141,7 +152,7 @@ private final class Fixture {
         }, transcribe: { [self] _, _, config in
             seenConfig = config
             transcriptionRequests += 1; await processing.wait()
-            return FinalTranscription(text: "Saved speech", segments: [], complete: true, issues: [])
+            return FinalTranscription(text: finalText, segments: [], complete: finalComplete, issues: [])
         }, uptime: { [self] in now }, credentials: { [self] provider in
             seenProvider = provider
             guard let credential = credentialVault.get(provider) else { throw CheckFailure(description: "Missing synthetic credential") }
@@ -150,6 +161,8 @@ private final class Fixture {
             if recordingSaveFails && record.status == .recording { throw CocoaError(.fileWriteOutOfSpace) }
             if stopSaveFails && !record.tracks.isEmpty && !record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
             if finalSaveFails && record.status == .complete && record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
+            if formattedSaveFails && record.transcript == formattedText { throw CocoaError(.fileWriteOutOfSpace) }
+            if cancellationSaveFails && record.status == .cancelled { throw CocoaError(.fileWriteOutOfSpace) }
             try store.save(record)
         }, cleanAudio: { [self] store, record in
             cleanups += 1; try store.cleanAudio(for: record)
@@ -167,13 +180,22 @@ private final class Fixture {
             deliveryWrites += 1; deliveredFocus = target
             return automatic ? automaticOutcome : manualOutcome
         },
-        copy: { [self] _ in copies += 1 }, automaticTimer: false)
+        copy: { [self] _ in copies += 1 }, automaticTimer: false, format: { [self] raw, config in
+            guard formatterEnabled else { return raw }
+            formatterRequests += 1
+            let saved = try store.load().first
+            rawSavedBeforeFormatting = saved?.transcript == raw && saved?.rawTranscript == raw &&
+                seenConfig?.baseURL == config.baseURL && seenConfig?.authValue == config.authValue
+            if blocksFormatting { await formatting.wait() }
+            if formattingCancelled { throw CancellationError() }
+            return formattedText
+        })
         model = AppModel(store: store, operations: operations, preferences: preferences, initializeSystemState: false,
             credentialAccess: credentialAccess, verificationSession: verificationSession)
         model.micGranted = true; model.acceptConsent()
     }
     func close() async {
-        startup.release(); processing.release(); delivery.release()
+        startup.release(); processing.release(); delivery.release(); formatting.release()
         await model?.prepareToQuit()
         model = nil; verificationSession.invalidateAndCancel()
         preferences.removePersistentDomain(forName: preferenceDomain)
@@ -209,6 +231,113 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
+            ("Formatter saves raw first and accepted paragraphs before current-caret delivery", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                f.formattedText = "Saved\n\nspeech."
+                try await f.beginProcessing(); f.processing.release()
+                try await until("formatter entry") { f.formatting.entered }
+                try check(f.rawSavedBeforeFormatting && f.insertions == 0 && f.model.phase == .transcribing,
+                          "Raw text must be durable and credentials shared before formatting or insertion")
+                f.currentFocus = "Final field"; f.formatting.release()
+                try await until("formatted completion") { f.model.phase == .done }
+                let saved = try f.store.load().first
+                try check(saved?.rawTranscript == "Saved speech" && saved?.transcript == f.formattedText &&
+                          f.insertedAfterDurableText && f.deliveredFocus == "Final field",
+                          "Accepted paragraphs must be saved before completion-focus delivery")
+                var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(saved!)) as! [String: Any]
+                legacy.removeValue(forKey: "rawTranscript")
+                let decoded = try JSONDecoder().decode(SessionRecord.self, from: JSONSerialization.data(withJSONObject: legacy))
+                try check(decoded.rawTranscript == nil && decoded.transcript == f.formattedText,
+                          "Legacy records must decode without inventing a raw transcript")
+            }),
+            ("Escape during formatting retains raw without late delivery or cleanup", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("formatter cancellation entry") { f.formatting.entered }
+                f.model.cancelDictation(); f.formatting.release()
+                try await until("formatter cancelled completion") { f.model.phase == .done }
+                let saved = try f.store.load().first
+                try check(saved?.status == .cancelled && saved?.transcript == "Saved speech" &&
+                          saved?.rawTranscript == "Saved speech" && f.insertions == 0 && f.cleanups == 0 && f.audioExists(),
+                          "Late formatter output must not overwrite or insert a cancelled transcript")
+            }),
+            ("Formatter cancellation error after Escape reaches done", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true; f.formattingCancelled = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("formatter cancelled request") { f.formatting.entered }
+                f.model.cancelDictation(); f.formatting.release()
+                try await until("formatter cancellation error") { f.model.phase == .done }
+                try check(f.model.activeRecord?.delivery == .cancelled && f.insertions == 0 && f.cleanups == 0 &&
+                          f.model.activeRecord?.issues.isEmpty == true,
+                          "Cancellation must finish without an unavailable warning or lost raw text")
+            }),
+            ("Failed Escape persistence still shows Cancelled and blocks delivery", { f in
+                f.formatterEnabled = true; f.blocksFormatting = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("failed cancellation persistence entry") { f.formatting.entered }
+                f.cancellationSaveFails = true; f.model.cancelDictation(); f.formatting.release()
+                try await until("failed cancellation persistence completion") { f.model.phase == .done }
+                try check(f.model.chipState == .cancelled && f.insertions == 0 && f.cleanups == 0 && f.audioExists() &&
+                          f.model.activeRecord?.transcript == "Saved speech",
+                          "The in-memory cancellation latch must own feedback despite failed durable cancellation")
+            }),
+            ("Formatted save failure keeps durable raw and audio with zero insertion", { f in
+                f.formatterEnabled = true; f.formattedSaveFails = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("formatted save failure") { f.model.phase == .error }
+                let saved = try f.store.load().first
+                try check(saved?.transcript == "Saved speech" && saved?.rawTranscript == "Saved speech" &&
+                          f.model.activeRecord?.transcript == "Saved speech" && f.insertions == 0 && f.cleanups == 0 && f.audioExists(),
+                          "Unsaved formatted content must never be pasted or remove recovery audio")
+            }),
+            ("Raw save failure prevents formatter invocation", { f in
+                f.formatterEnabled = true; f.finalSaveFails = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("raw save failure") { f.model.phase == .error }
+                try check(f.formatterRequests == 0 && f.insertions == 0 && f.audioExists(),
+                          "Formatting cannot begin before raw content is durably committed")
+            }),
+            ("Partial dictation bypasses formatting", { f in
+                f.formatterEnabled = true; f.finalComplete = false
+                try await f.beginProcessing(); f.processing.release()
+                try await until("partial completion") { f.model.phase == .done }
+                try check(f.formatterRequests == 0 && f.insertions == 0 && f.model.activeRecord?.transcript == "Saved speech",
+                          "Incomplete transcripts must retain their existing behavior")
+            }),
+            ("Empty dictation bypasses formatting", { f in
+                f.formatterEnabled = true; f.finalText = " \n"
+                try await f.beginProcessing(); f.processing.release()
+                try await until("empty completion") { f.model.phase == .done }
+                try check(f.formatterRequests == 0 && f.insertions == 0 && f.model.chipState == .silent,
+                          "Empty dictation must not call the formatter")
+            }),
+            ("Meeting transcript remains unformatted and has no raw dictation field", { f in
+                f.formatterEnabled = true; f.model.meetingMode = .inPerson
+                f.model.startMeeting(); f.startup.release()
+                try await until("meeting recording") { f.model.phase == .recording }
+                f.model.finishRecording(); try await until("meeting processing") { f.processing.entered }
+                f.processing.release(); try await until("meeting completion") { f.model.phase == .done }
+                let saved = try f.store.load().first
+                try check(f.formatterRequests == 0 && f.insertions == 0 && saved?.transcript == "Saved speech" &&
+                          saved?.rawTranscript == nil && saved?.kind == .meeting,
+                          "Meetings must retain their existing transcription and export path")
+            }),
+            ("Raw formatter fallback retains normal durable insertion", { f in
+                f.formatterEnabled = true; f.formattedText = "Saved speech"
+                try await f.beginProcessing(); f.processing.release()
+                try await until("fallback completion") { f.model.phase == .done }
+                try check(f.formatterRequests == 1 && f.insertedAfterDurableText && f.deliveryWrites == 1 &&
+                          f.model.activeRecord?.transcript == "Saved speech" && f.model.statusDetail.isEmpty,
+                          "Silent fallback must deliver the already durable raw transcript normally")
+            }),
+            ("Historical retry may format but never inserts automatically", { f in
+                f.formatterEnabled = true
+                let id = try f.addHistoricalRecord(status: .failed)
+                f.model.retry(id); try await until("historical transcription") { f.processing.entered }
+                f.processing.release(); try await until("historical formatted completion") { f.model.phase == .done }
+                try check(f.formatterRequests == 1 && f.model.activeRecord?.transcript == f.formattedText && f.insertions == 0,
+                          "Formatting must preserve the historical retry insertion boundary")
+            }),
             ("Provider defaults preserve legacy accounts without guessing credential contents", { f in
                 try check(f.model.connectionProvider == .openAI, "Fresh users must default to direct OpenAI")
                 let fixtures: [(CredentialSession.ReadResult, Bool, ConnectionProvider?, ConnectionProvider)] = [

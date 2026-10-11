@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
         var deliverAtCurrentCaret: (String, @escaping @MainActor () -> Bool) async -> PasteService.Outcome
         var copy: (String) -> Void
         var automaticTimer = true
+        var format: ((String, OpenAIConfig) async throws -> String)? = nil
 
         @MainActor static func live() -> Operations {
             let paste = PasteService()
@@ -58,7 +59,9 @@ final class AppModel: ObservableObject {
             }, save: { try $0.save($1) }, cleanAudio: { try $0.cleanAudio(for: $1) },
             deliverAtCurrentCaret: { text, canDeliver in
                 await paste.deliverAtCurrentCaret(text, canDeliver: canDeliver)
-            }, copy: { paste.copy($0) })
+            }, copy: { paste.copy($0) }, format: { raw, credentials in
+                try await formatDictation(raw, config: credentials)
+            })
         }
     }
     @Published var phase: Phase = .idle
@@ -411,15 +414,28 @@ final class AppModel: ObservableObject {
                 guard self.activeSessionID == id else { return }
                 guard self.mutate(id, {
                     $0.transcript = result.text; $0.segments = result.segments
+                    if $0.kind == .dictation { $0.rawTranscript = result.text }
                     $0.transcriptionIssues = result.issues
                     $0.issues = ($0.captureIncomplete ? $0.issues : []) + result.issues.map(\.userMessage)
                     $0.status = result.complete && !$0.captureIncomplete ? .complete : .partial
                     if self.cancelledIDs.contains(id) || $0.delivery == .cancelled { $0.status = .cancelled; $0.delivery = .cancelled }
                     else if $0.delivery == .eligible { $0.delivery = .ready }
                 }) else { self.phase = .error; self.setChip(.failed); return }
+                if let raw = self.records.first(where: { $0.id == id }), raw.kind == .dictation,
+                   raw.status == .complete, raw.hasText, raw.delivery != .cancelled,
+                   !self.cancelledIDs.contains(id), !Task.isCancelled, let format = self.operations.format {
+                    let formatted = try await format(raw.transcript, credentials)
+                    guard self.activeSessionID == id else { return }
+                    if !Task.isCancelled, !self.cancelledIDs.contains(id), self.activeRecord?.delivery != .cancelled,
+                       formatted != raw.transcript {
+                        guard self.mutate(id, { $0.transcript = formatted }) else {
+                            self.phase = .error; self.setChip(.failed); return
+                        }
+                    }
+                }
                 let current = self.records.first { $0.id == id }!
                 if current.kind == .dictation {
-                    if current.delivery == .cancelled { self.setChip(.cancelled, dismissAfter: 12) }
+                    if self.cancelledIDs.contains(id) || current.delivery == .cancelled { self.setChip(.cancelled, dismissAfter: 12) }
                     else if !current.hasText { self.setChip(result.complete ? .silent : .failed, dismissAfter: 8) }
                     else if self.canAutomaticallyDeliver(id: id, text: current.transcript) {
                         // Native delivery resolves focus now, after final text is durable.
@@ -447,6 +463,10 @@ final class AppModel: ObservableObject {
                 if !self.keepAudio, !self.cancelledIDs.contains(id), let final = self.records.first(where: { $0.id == id }) { do { try self.operations.cleanAudio(store, final) } catch { self.statusDetail = "Transcript saved; audio retained" } }
                 self.phase = .done
             } catch {
+                if self.cancelledIDs.contains(id) || self.activeRecord?.delivery == .cancelled {
+                    self.automaticDeliveryID = nil; self.phase = .done
+                    self.setChip(.cancelled, dismissAfter: 12); return
+                }
                 _ = self.mutate(id) { $0.status = $0.delivery == .cancelled ? .cancelled : .failed; $0.issues.append("Transcription unavailable"); if $0.delivery == .eligible { $0.delivery = .ready } }
                 self.phase = .error; self.statusDetail = self.hasKey ? "Transcription unavailable" : "Add your " + self.connectionProvider.credentialLabel.lowercased()
                 self.setChip(self.activeRecord?.delivery == .cancelled ? .cancelled : .failed, dismissAfter: 12)
