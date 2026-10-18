@@ -4,7 +4,7 @@
 
 A Mac app that turns speech into text. Use it to dictate into any app, or to record a meeting and get a transcript and notes.
 
-**[Download Transcribe 2.0.10 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.10/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
+**[Download Transcribe 2.0.11 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.11/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
 
 https://github.com/user-attachments/assets/d4a4af78-cfd9-4e01-9ce1-a4d9795d30bd
 
@@ -33,7 +33,7 @@ Record an online call (your microphone plus the audio playing on your Mac) or an
 
 Audio and text needed for transcription, formatting and meeting notes are sent to OpenAI. Your history is stored on your Mac. Tell people before you record them.
 
-Install 2.0.9 manually once. Future versions appear as a small **Actualizar** button that downloads, installs and restarts the app.
+Versions 2.0.9 and later show available updates as a small **Actualizar** button that downloads, installs and restarts the app. If you have an older version, install the current Mac download once to enable in-app updates.
 
 ## More
 

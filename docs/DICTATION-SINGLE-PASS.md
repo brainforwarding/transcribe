@@ -1,6 +1,6 @@
 # Single-prompt dictation
 
-18 October 2026. Included as an optional setting in the 2.0.11 release candidate,
+18 October 2026. Included as an optional setting in release 2.0.11,
 following the owner's local trial and approval to publish.
 
 The owner's 252.95 s recording used Background, with 13 confirmed turns. Of its

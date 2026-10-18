@@ -1,7 +1,7 @@
 # Dictation editor measurements
 
 18 October 2026. Local measurements supporting the optional Faster dictation
-setting in the 2.0.11 release candidate. Owner approved publication after trial.
+setting in release 2.0.11. Owner approved publication after trial.
 
 ## Controlled four-minute text comparison
 

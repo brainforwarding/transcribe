@@ -6,6 +6,15 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>Transcribe</title>
         <item>
+            <title>2.0.11</title>
+            <pubDate>Sun, 18 Oct 2026 12:34:33 -0300</pubDate>
+            <sparkle:version>13</sparkle:version>
+            <sparkle:shortVersionString>2.0.11</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/brainforwarding/transcribe/releases/download/v2.0.11/Transcribe.dmg" length="3599155" type="application/octet-stream" sparkle:edSignature="rwkemo9JVnxuN1MuwLyoFfKtUmiBrdpDXCtJBvOu/sFOVbH2GdbmaMFy18rnwh2X5iGRlviGyeLsNk5kabORAg=="/>
+        </item>
+        <item>
             <title>2.0.10</title>
             <pubDate>Sun, 11 Oct 2026 17:29:51 -0300</pubDate>
             <sparkle:version>12</sparkle:version>
@@ -26,6 +35,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: 0FiFtUIay7vR1qQuTK8/fDDzq4I1QjTg7AzPf0xQeZnm6gd2MT+j7VPvyocmzhuPFbGmJfP1E+vGsrkJd1n8Cw==
-length: 1809
+edSignature: CpCz0dEYfhrPrrdLhjCHvqVfPmIYt/HZhx9JSA6mrjWr++oVyvpwKN73oKiP3s3JHwTfGZKHc6Y4nRL+nYI9Bw==
+length: 2498
 -->

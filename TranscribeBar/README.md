@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Install
 
-[Download Transcribe 2.0.10](https://github.com/brainforwarding/transcribe/releases/download/v2.0.10/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The installer is signed, notarized and stapled. Public distribution checks are recorded in [the implementation state](../docs/IMPLEMENTATION.md). [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.0.10).
+[Download Transcribe 2.0.11](https://github.com/brainforwarding/transcribe/releases/download/v2.0.11/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The installer is signed, notarized and stapled. Public distribution checks are recorded in [the implementation state](../docs/IMPLEMENTATION.md). [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.0.11).
 
 ## Run from source
 
@@ -96,7 +96,7 @@ Incomplete meetings retain audio for recovery. Complete transcripts are saved be
 
 Starting with 2.0.9, an available update shows a small **Actualizar** button at the bottom of the sidebar. Click it to download, install and restart. The button changes to **Descargando** and **Instalando** while it works. Active recordings and other ongoing work finish before an update can start. Unsaved edits must be saved before restart; failures offer **Reintentar**.
 
-Install 2.0.9 manually once to receive future updates this way. Updates use signed archives and a signed feed, and each production app is Developer ID signed and notarized. [Updater release instructions](../docs/UPDATER-RELEASE.md).
+If you have 2.0.8 or earlier, install the current Mac download once to receive future updates this way. Updates use signed archives and a signed feed, and each production app is Developer ID signed and notarized. [Updater release instructions](../docs/UPDATER-RELEASE.md).
 
 ## Validate and release
 
