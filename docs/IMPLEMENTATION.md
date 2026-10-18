@@ -389,3 +389,33 @@ The unauthenticated public download matches the notarized installer exactly and 
 Public raw feed equals committed bytes and signature verification passes; SHA256 `72a9690ae257e5cef5a21a5a774fe3a3f44d401061b3cb9e04f7548b22a16e83`, current2.0.10/build12, minmacOS13, arm64, exact public installer URL/length, with the2.0.9 entry preserved. `PUBLIC-FEED-VERIFICATION.json` records the proof. No relay or production credential changes were necessary.
 
 Editable Circles Figma current boards72:567/88:292 are promoted to2.0.10. Root directly accepted light/dark credential status rows and external live-follow behavior annotation; no app-screen explainer was added. Credential section100:998 and following note101:398 match the source. `docs/FIGMA-STATE.json` preserves the complete accepted2.0.9 receipt and its PNG proofs. Implementation, independent review, offline checks, notarized public release/feed, canonical deployment and design parity are complete. Owner retains actual audio/API, Copy/clipboard/paste and live-scroll quality testing. The untracked owner Markdown export was preserved and never staged.
+
+## 2026-10-18 · 2.0.11 public release
+
+Owner approved publishing the locally tested faster-dictation, capture safeguards,
+audio-retention and compact UI improvements. Source freeze
+`5dcf86d12e34e9650e064841b5dd4268b1ff9fc4` is tagged `v2.0.11`.
+Faster dictation remains optional for OpenAI connections and uses one Luna Fast
+assembly request. Failed background recognition falls back to whole-recording
+transcription and ordinary formatting. Groq benchmark alternatives are excluded
+from the production binary. Default audio retention is seven days; incomplete,
+failed and cancelled recordings are retained for recovery.
+
+Core contracts/store tests, 67 actual AppModel lifecycle checks, 94 native
+shortcut/cache/paste checks, 30 updater checks, 15 live-follow checks, relay tests
+and nine updater-secret fixture checks passed. All 53 Swift/package source hashes
+match the freeze. The release app and DMG passed Developer ID signatures, Apple
+notarization, stapling, Gatekeeper and contained-app distribution checks.
+App submission `5d1daaeb-79a5-417a-bbee-e35937b295c4` was Accepted.
+
+[Release 2.0.11](https://github.com/brainforwarding/transcribe/releases/tag/v2.0.11)
+is published and selected latest. Its installer is 3,599,155 bytes, SHA256
+`3123e7b7a175750f84d264c327c9372a6f61316f3e69ddb7757baa53e2b0474d`.
+The exact signed public feed promotes build 13 and retains prior releases. Fresh
+unauthenticated public installer/checksum/feed verification, feed/archive signatures
+and readonly mounted public contained-app checks passed. Receipts are under
+`~/Documents/Transcribe Builds/Transcribe-2.0.11-release.iddxd1uk/`.
+Existing updater-capable installations receive the release on their next scheduled
+check. The owner's running local trial app was left undisturbed during publication;
+no recording, history, clipboard or credential changes were made by release checks.
+Unrelated Figma state edits and personal Markdown exports were preserved and not staged.
