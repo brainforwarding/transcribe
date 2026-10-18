@@ -10,11 +10,7 @@ struct DictationHistoryView: View {
     }
 
     private var visibleRecords: [SessionRecord] {
-        model.filteredRecords.filter { record in
-            record.hasText || !record.preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || record.canRecover || model.serviceNotice(for: record) != nil
-                || isCaptureActive(record) || model.formattingRecordID == record.id
-        }
+        model.filteredRecords
     }
     private var dayGroups: [DayGroup] {
         let groups = Dictionary(grouping: visibleRecords) { Calendar.current.startOfDay(for: $0.startedAt) }
@@ -91,6 +87,13 @@ struct DictationHistoryView: View {
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 } else if !active && !formatting && notice == nil && record.canRecover {
                     Text("Recording available").font(DesignSystem.font(14)).foregroundStyle(DesignSystem.muted)
+                } else if !active && !formatting && notice == nil {
+                    Text(emptyMessage(for: record))
+                        .font(DesignSystem.font(14)).foregroundStyle(DesignSystem.muted)
+                    if record.captureIncomplete, let issue = record.issues.first,
+                       !issue.contains("saved audio"), !issue.contains("saved recording") {
+                        Text(issue).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+                    }
                 }
                 if formatting {
                     HStack(spacing: 12) {
@@ -113,6 +116,7 @@ struct DictationHistoryView: View {
                         }
                     }
                 }
+
             }.frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
                 if record.hasText {
@@ -133,6 +137,12 @@ struct DictationHistoryView: View {
 
     private func isCaptureActive(_ record: SessionRecord) -> Bool {
         record.id == model.activeSessionID && [.starting, .recording, .stopping, .transcribing].contains(model.phase)
+    }
+    private func emptyMessage(for record: SessionRecord) -> String {
+        if record.status == .complete { return "No speech detected." }
+        if record.tracks.contains(where: { !$0.spans.isEmpty }) { return "Recording saved. Transcription could not finish." }
+        if record.status == .cancelled { return "Cancelled. No audio was captured." }
+        return "No audio was captured. Check your microphone before trying again."
     }
     private var activeLabel: String {
         switch model.phase {

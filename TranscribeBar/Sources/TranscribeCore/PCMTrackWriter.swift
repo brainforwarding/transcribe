@@ -31,10 +31,10 @@ final class PCMTrackWriter {
     func append(_ input: AVAudioPCMBuffer, pts: Double) throws {
         guard pts.isFinite else { throw RuntimeError("Audio capture returned an invalid clock.") }
         let inputDuration = Double(input.frameLength) / input.format.sampleRate
-        if let expectedPTS, abs(pts - expectedPTS) > 0.12 {
-            finishPart()
-            health(.interrupted, message: "An audio gap was detected. The captured sections are preserved.")
-        }
+        // A clock discontinuity starts a new span so timing stays exact. It is not reported:
+        // short gaps are routine (device start-up, scheduling), and real outages are caught
+        // by each source's liveness watchdog, which reports a stall of 3 s or more.
+        if let expectedPTS, abs(pts - expectedPTS) > 0.12 { finishPart() }
         expectedPTS = pts + inputDuration
         if inputFormat != input.format {
             inputFormat = input.format

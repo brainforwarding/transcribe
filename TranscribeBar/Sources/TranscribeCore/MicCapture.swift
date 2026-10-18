@@ -8,87 +8,82 @@ public struct MicDevice: Sendable, Identifiable, Hashable {
     public var id: String { uniqueID }
 }
 
+/// Which microphone path a capture used, recorded in `capture.json` for debugging.
+public struct MicProcessing: Sendable {
+    public enum Mode: String, Sendable { case voice, raw }
+    public let mode: Mode
+    /// Why the raw path was used although voice processing was requested.
+    public let note: String?
+}
+
 @available(macOS 13.0, *)
-public final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
+public final class MicCapture: @unchecked Sendable {
     public static func available() -> [MicDevice] {
         var types: [AVCaptureDevice.DeviceType] = [.builtInMicrophone]
         if #available(macOS 14.0, *) { types.append(.external) }
         return AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .audio, position: .unspecified)
-            .devices.map { MicDevice(uniqueID: $0.uniqueID, name: $0.localizedName) }
+            .devices.filter { CoreAudioDevices.isMicrophone(uid: $0.uniqueID) }
+            .map { MicDevice(uniqueID: $0.uniqueID, name: $0.localizedName) }
     }
-    private let session = AVCaptureSession()
-    private let output = AVCaptureAudioDataOutput()
     private let queue = DispatchQueue(label: "transcribe.mic.capture")
     private let lock = NSLock()
+    private let echoCancellation: Bool
     private var stopped = false
-    private var firstPTS: CMTime?
+    private var input: MicInput?
+    private var processing: MicProcessing?
     private var liveness = AudioLiveness()
     private var livenessReported = false
     private var watchdog: DispatchSourceTimer?
-    private var observers: [NSObjectProtocol] = []
+    private let startup = MicrophoneStartup()
     private let recorder: PCMTrackWriter
     public var onLog: (@Sendable (String) -> Void)?
     public var onLevel: (@Sendable (Double) -> Void)?
     public var onHealth: (@Sendable (CaptureHealth) -> Void)?
     public var onPart: (@Sendable (AudioSpan) -> Void)?
     public var onAudioFrame: (@Sendable (CapturedAudioFrame) -> Void)?
-    public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))) {
+    /// `echoCancellation` asks for voice processing (online meetings). The raw
+    /// microphone is used when it is unavailable, so recording never depends on it.
+    public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())),
+                echoCancellation: Bool = false) {
         recorder = PCMTrackWriter(directory: outputURL.deletingLastPathComponent(), source: .mic, epoch: epoch)
-        super.init()
+        self.echoCancellation = echoCancellation
         recorder.onLevel = { [weak self] in self?.onLevel?($0) }
         recorder.onHealth = { [weak self] in self?.onHealth?($0) }
         recorder.onPart = { [weak self] in self?.onPart?($0) }
         recorder.onAudioFrame = { [weak self] in self?.onAudioFrame?($0) }
-        for name in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
-            observers.append(NotificationCenter.default.addObserver(forName: name, object: session, queue: nil) { [weak self] _ in
-                guard let self else { return }
-                self.queue.async { [weak self] in
-                    guard let self, !self.isStopped else { return }
-                    self.reportInterruption("Microphone capture was interrupted. The saved audio is preserved.")
-                }
-            })
-        }
     }
-    deinit { watchdog?.cancel(); observers.forEach(NotificationCenter.default.removeObserver) }
+    deinit { watchdog?.cancel() }
     private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
-    public var firstSamplePTS: CMTime? { queue.sync { firstPTS } }
     public var capturedSpans: [AudioSpan] { queue.sync { recorder.spans } }
     public var closedSpans: [AudioSpan] { queue.sync { recorder.closedSpans() } }
+    /// Set once the microphone has started.
+    public var microphoneProcessing: MicProcessing? { queue.sync { processing } }
+
     @discardableResult
     public func start(uniqueID: String?) throws -> String {
-        let name = try queue.sync {
-            guard !isStopped else { throw CancellationError() }
-            let device: AVCaptureDevice
-            if let uniqueID {
-                guard let chosen = AVCaptureDevice(uniqueID: uniqueID) else {
-                    throw RuntimeError("The selected microphone is unavailable. Choose another microphone.")
-                }
-                device = chosen
-            } else {
-                guard let chosen = AVCaptureDevice.default(for: .audio) else { throw RuntimeError("No microphone is available.") }
-                device = chosen
+        guard !isStopped else { throw CancellationError() }
+        // Resolve the device before choosing a path, so an unavailable microphone
+        // fails exactly as before and is never hidden by a fallback.
+        let device: AVCaptureDevice
+        if let uniqueID {
+            guard CoreAudioDevices.isMicrophone(uid: uniqueID),
+                  let chosen = AVCaptureDevice(uniqueID: uniqueID) else {
+                throw MicrophoneCaptureError(message: "The selected microphone is disconnected or unavailable. Connect it or choose another microphone.")
             }
-            onHealth?(CaptureHealth(source: .mic, state: .starting))
-            session.beginConfiguration()
-            defer { session.commitConfiguration() }
-            let input = try AVCaptureDeviceInput(device: device)
-            guard session.canAddInput(input), session.canAddOutput(output) else {
-                throw RuntimeError("The microphone could not be configured.")
+            device = chosen
+        } else {
+            guard let uid = CoreAudioDevices.defaultInputUID(),
+                  let chosen = AVCaptureDevice(uniqueID: uid) else {
+                throw MicrophoneCaptureError(message: "No microphone is connected. Connect a microphone and try again.")
             }
-            session.addInput(input); session.addOutput(output)
-            output.setSampleBufferDelegate(self, queue: queue)
-            return device.localizedName
+            device = chosen
         }
-        try beginRunning()
-        return name
-    }
-    fileprivate func beginRunning() throws {
+        onHealth?(CaptureHealth(source: .mic, state: .starting))
+        queue.sync { liveness.start(at: captureHostSeconds()) }
+        let (started, processing) = try startInput(device, explicitlySelected: uniqueID != nil)
         try queue.sync {
-            guard !isStopped else { throw CancellationError() }
-            session.startRunning()
-            if isStopped { session.stopRunning(); throw CancellationError() }
-            guard session.isRunning else { throw RuntimeError("The microphone could not start.") }
-            liveness.start(at: captureHostSeconds())
+            guard !isStopped else { started.stop(); throw CancellationError() }
+            input = started; self.processing = processing
             let timer = DispatchSource.makeTimerSource(queue: queue)
             timer.schedule(deadline: .now() + 1, repeating: 1)
             timer.setEventHandler { [weak self] in
@@ -97,8 +92,65 @@ public final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             }
             watchdog = timer; timer.resume()
         }
+        do { try startup.wait() }
+        catch {
+            queue.sync { started.stop(); _ = recorder.stop() }
+            throw error
+        }
+        return device.localizedName
+    }
+    /// Voice processing when requested and possible, otherwise the raw microphone.
+    private func startInput(_ device: AVCaptureDevice, explicitlySelected: Bool) throws -> (MicInput, MicProcessing) {
+        var note: String?
+        if echoCancellation {
+            if ProcessInfo.processInfo.environment["TRANSCRIBE_MIC_PROCESSING"] == "raw" {
+                note = "Forced by TRANSCRIBE_MIC_PROCESSING=raw."
+            } else if #available(macOS 14.0, *) {
+                let voice = VoiceProcessingMicInput(queue: queue)
+                connect(voice)
+                do {
+                    try voice.start(device: device, explicitlySelected: explicitlySelected)
+                    return (voice, MicProcessing(mode: .voice, note: nil))
+                } catch {
+                    // The input has already torn itself down.
+                    note = "Echo cancellation unavailable: \(error)"
+                    onLog?("Echo cancellation unavailable; recording the raw microphone.")
+                }
+            } else {
+                note = "Echo cancellation needs macOS 14."
+            }
+            guard !isStopped else { throw CancellationError() }
+        }
+        let raw = CaptureSessionMicInput(queue: queue)
+        connect(raw)
+        try raw.start(device: device, explicitlySelected: explicitlySelected)
+        return (raw, MicProcessing(mode: .raw, note: note))
+    }
+    private func connect(_ input: MicInput) {
+        input.onBuffer = { [weak self] buffer, time in self?.receive(buffer, at: time) }
+        input.onInterruption = { [weak self] message in
+            guard let self, !self.isStopped else { return }
+            self.reportInterruption(message)
+        }
+    }
+    /// On the capture queue.
+    private func receive(_ buffer: AVAudioPCMBuffer, at time: Double) {
+        guard !isStopped else { return }
+        liveness.received(at: captureHostSeconds())
+        do {
+            try recorder.append(buffer, pts: time)
+            if recorder.spans.contains(where: { $0.duration > 0 }) { startup.recordedAudio() }
+        }
+        catch {
+            startup.failed("Microphone audio could not be saved.")
+            onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: "Microphone audio could not be saved."))
+            onLog?("Microphone audio could not be saved.")
+        }
     }
     private func reportInterruption(_ message: String) {
+        let message = recorder.spans.contains(where: { $0.duration > 0 }) ? message
+            : "No microphone audio was captured. Connect a microphone and try again."
+        startup.failed(message)
         guard !livenessReported else { return }
         livenessReported = true
         onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: message))
@@ -117,29 +169,11 @@ public final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             queue.async {
                 self.checkLiveness(at: stopRequestedAt)
                 self.watchdog?.cancel(); self.watchdog = nil
-                self.session.stopRunning()
+                self.input?.stop()
                 _ = self.recorder.stop()
                 self.onLevel?(0)
                 continuation.resume()
             }
         }
-    }
-    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
-                              from connection: AVCaptureConnection) {
-        guard !isStopped, CMSampleBufferDataIsReady(sampleBuffer) else { return }
-        liveness.received(at: captureHostSeconds())
-        guard let pcm = SystemAudioCapture.makePCMBuffer(from: sampleBuffer) else {
-            reportInterruption("Microphone audio could not be decoded."); return
-        }
-        if firstPTS == nil { firstPTS = sampleBuffer.presentationTimeStamp }
-        do { try recorder.append(pcm, pts: CMTimeGetSeconds(sampleBuffer.presentationTimeStamp)) }
-        catch {
-            onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: "Microphone audio could not be saved."))
-            onLog?("Microphone audio could not be saved.")
-        }
-    }
-    public func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer,
-                              from connection: AVCaptureConnection) {
-        onHealth?(CaptureHealth(source: .mic, state: .interrupted, message: "Microphone audio was interrupted."))
     }
 }

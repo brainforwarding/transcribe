@@ -33,6 +33,24 @@ private final class SessionStoreChecks {
         try store.save(record)
         XCTAssertEqual(try store.load().first?.delivery, .cancelled)
     }
+    func testInterruptedLiveDictationRecoversTailWithoutRewritingConfirmedText() throws {
+        var record = SessionRecord(kind: .dictation, title: "Interrupted dictation")
+        record.liveDictationVersion = 1; record.status = .recording
+        let dir = store.directory(for: record.id)
+        record.tracks = [.init(source: .mic, spans: [.init(url: dir.appendingPathComponent("mic.wav"), offset: 0, duration: 1)])]
+        try record.applyMeetingTurns([.init(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "Already saved")])
+        try store.save(record)
+        let tail = SessionAudioTrack(source: .mic, spans: [.init(url: dir.appendingPathComponent("mic.wav"), offset: 0, duration: 2)])
+        try JSONEncoder().encode(tail).write(to: dir.appendingPathComponent("mic-capture.json"))
+        let restored = try XCTUnwrap(store.load().first)
+        XCTAssertEqual(restored.transcript, "Already saved")
+        XCTAssertEqual(restored.rawTranscript, "Already saved")
+        XCTAssertEqual(restored.tracks, [tail])
+        XCTAssertEqual(restored.meetingTurns, record.meetingTurns)
+        XCTAssertTrue(restored.canRecover)
+        XCTAssertEqual(restored.status, .failed)
+        XCTAssertEqual(restored.delivery, .ready)
+    }
     func testCancelledCaptureManifestRecoversBeforeStopCommit() throws {
         var record = SessionRecord(kind: .dictation, title: "Interrupted cancel")
         record.status = .cancelled; record.delivery = .cancelled; try store.save(record)
@@ -76,6 +94,32 @@ private final class SessionStoreChecks {
         XCTAssertFalse(FileManager.default.fileExists(atPath: owned.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
     }
+    func testExpiryPreservesFailuresAndUnmanagedAudio() throws {
+        let now = Date(), store = self.store!
+        var records: [SessionRecord] = []
+        for status: SessionStatus in [.complete, .failed, .partial, .cancelled] {
+            var record = SessionRecord(kind: .dictation, title: "Retention fixture")
+            record.status = status; record.transcript = "Saved text"; record.audioCompletedAt = now.addingTimeInterval(-8 * 86_400)
+            try store.save(record)
+            let file = store.directory(for: record.id).appendingPathComponent("mic.wav")
+            try Data([1]).write(to: file)
+            record.tracks = [.init(source: .mic, spans: [.init(url: file, offset: 0, duration: 1)])]
+            records.append(record)
+        }
+        var recent = SessionRecord(kind: .dictation, title: "Recent")
+        recent.status = .complete; recent.transcript = "Saved"; recent.audioCompletedAt = now
+        try store.save(recent)
+        let file = store.directory(for: recent.id).appendingPathComponent("mic.wav")
+        try Data([1]).write(to: file); recent.tracks = [.init(source: .mic, spans: [.init(url: file, offset: 0, duration: 1)])]
+        records.append(recent)
+        try store.purgeExpiredAudio(records: records, days: 7, now: now)
+        for record in records {
+            XCTAssertEqual(FileManager.default.fileExists(atPath: record.tracks[0].spans[0].url.path), record.id != records[0].id)
+        }
+        var legacy = recent; legacy.audioCompletedAt = nil
+        try store.purgeExpiredAudio(records: [legacy], days: 7, now: now.addingTimeInterval(100 * 86_400))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "no expiry for old unmanaged audio")
+    }
     func testLegacyMarkdownImportedOnceWithoutChangingOriginal() throws {
         let folder = directory.appendingPathComponent("exports")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -100,10 +144,12 @@ public func runSessionStoreSelftests() -> Bool {
     let tests: [(String, () throws -> Void)] = [
         ("durable processing recovery", checks.testAtomicRecordAndInterruptedProcessingDisableInsertion),
         ("cancelled delivery persists", checks.testCancelledDeliverySurvivesRestart),
+        ("interrupted live dictation tail recovery", checks.testInterruptedLiveDictationRecoversTailWithoutRewritingConfirmedText),
         ("cancelled capture manifest recovery", checks.testCancelledCaptureManifestRecoversBeforeStopCommit),
         ("capture gap retry policy", checks.testCaptureGapWithoutMissingTranscriptionDoesNotOfferFutileRetry),
         ("corrupt record isolation", checks.testDamagedRecordDoesNotHideValidHistory),
         ("owned complete audio cleanup", checks.testCleanupRetainsPartialAndOnlyDeletesOwnedCompleteAudio),
+        ("audio expiry preserves incomplete recordings", checks.testExpiryPreservesFailuresAndUnmanagedAudio),
         ("read-only legacy import", checks.testLegacyMarkdownImportedOnceWithoutChangingOriginal)]
     for (name, test) in tests {
         let before = checks.failures.count

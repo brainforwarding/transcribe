@@ -9,6 +9,20 @@ public enum SessionStatus: String, Codable, Sendable {
 public enum DeliveryState: String, Codable, Sendable { case never, eligible, ready, inserted, cancelled }
 public enum SummaryStatus: String, Codable, Sendable { case none, processing, complete, failed }
 
+/// Local timing only; no transcript, audio, credential or remote analytics data.
+public struct DictationPerformance: Codable, Sendable {
+    public enum Mode: String, Codable, Sendable { case standard, background, live }
+    public var mode: Mode
+    public var stopToTranscript: Double?
+    public var formatting: Double?
+    public var stopToReady: Double?
+    public var boundaryReview: Double?
+    public var usedRecovery: Bool
+    public init(mode: Mode) {
+        self.mode = mode; stopToTranscript = nil; formatting = nil; stopToReady = nil; usedRecovery = false
+    }
+}
+
 /// Durable user content. Audio stays inside this record's owned directory until a
 /// complete transcript has been saved. Historical recovery never enables insertion.
 public struct SessionRecord: Identifiable, Codable, Sendable {
@@ -17,6 +31,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var meetingMode: MeetingMode
     public var title: String
     public var startedAt: Date
+    public var audioCompletedAt: Date?
     public var duration: Double
     public var status: SessionStatus
     public var delivery: DeliveryState
@@ -29,6 +44,8 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var segments: [Segment]
     public var summary: String
     public var summaryStatus: SummaryStatus
+    /// Why the last notes generation failed. Safe category only.
+    public var summaryFailure: ServiceFailureKind?
     public var summaryEvidenceIDs: [String]
     public var summaryEvidence: [NoteEvidence]
     public var summaryNotesSnapshot: String
@@ -42,6 +59,10 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var language: String?
     public var keywords: [String]
     public var liveMeetingVersion: Int?
+    public var liveDictationVersion: Int?
+    public var dictationPerformance: DictationPerformance?
+    public var dictationBoundaryResult: DictationBoundaryResult?
+    public var usesLiveTranscription: Bool { liveMeetingVersion != nil || liveDictationVersion != nil }
     public var meetingTurns: [MeetingTurn]
     public var transcriptRevision: Int
     public var summaryTranscriptRevision: Int?
@@ -55,16 +76,17 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         self.keywords = keywords; duration = 0; status = .starting
         delivery = kind == .dictation ? .eligible : .never
         notes = ""; preview = ""; transcript = ""; rawTranscript = nil; formattingFailure = nil; serviceProviderID = nil; segments = []
-        summary = ""; summaryStatus = .none; summaryEvidenceIDs = []; summaryEvidence = []; summaryNotesSnapshot = ""
+        summary = ""; summaryStatus = .none; summaryFailure = nil; summaryEvidenceIDs = []; summaryEvidence = []; summaryNotesSnapshot = ""
         issues = []; transcriptionIssues = []; tracks = []; captureIncomplete = false
         exportURL = nil; importURL = nil; imported = false
-        liveMeetingVersion = nil; meetingTurns = []; transcriptRevision = 0; summaryTranscriptRevision = nil
+        liveMeetingVersion = nil; liveDictationVersion = nil; dictationPerformance = nil
+        meetingTurns = []; transcriptRevision = 0; summaryTranscriptRevision = nil
     }
 
     public var canRecover: Bool {
         let hasAudio = tracks.contains { !$0.spans.isEmpty }
-        if liveMeetingVersion != nil {
-            return hasAudio && (!uncoveredMeetingAudio(tracks: tracks, turns: meetingTurns, includePending: false).isEmpty)
+        if usesLiveTranscription {
+            return hasAudio && !uncoveredMeetingAudio(tracks: tracks, turns: meetingTurns, includePending: false).isEmpty
         }
         if status == .partial { return hasAudio && transcriptionIssues.contains { $0.retryable || $0.failureKind?.allowsRecoveryAfterRemedy == true } }
         return hasAudio && (status == .failed || status == .cancelled)
@@ -73,10 +95,10 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var hasText: Bool { !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private enum CodingKeys: String, CodingKey {
-        case id, kind, meetingMode, title, startedAt, duration, status, delivery, notes, preview, transcript, rawTranscript, formattingFailure, serviceProviderID,
-             segments, summary, summaryStatus, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
+        case id, kind, meetingMode, title, startedAt, audioCompletedAt, duration, status, delivery, notes, preview, transcript, rawTranscript, formattingFailure, serviceProviderID,
+             segments, summary, summaryStatus, summaryFailure, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
              issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords,
-             liveMeetingVersion, meetingTurns, transcriptRevision, summaryTranscriptRevision
+             liveMeetingVersion, liveDictationVersion, dictationPerformance, dictationBoundaryResult, meetingTurns, transcriptRevision, summaryTranscriptRevision
     }
     public init(from decoder: Decoder) throws {
         let v = try decoder.container(keyedBy: CodingKeys.self)
@@ -87,9 +109,13 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
                   language: try v.decodeIfPresent(String.self, forKey: .language),
                   keywords: try v.decodeIfPresent([String].self, forKey: .keywords) ?? [])
         liveMeetingVersion = try v.decodeIfPresent(Int.self, forKey: .liveMeetingVersion)
+        liveDictationVersion = try v.decodeIfPresent(Int.self, forKey: .liveDictationVersion)
+        dictationPerformance = try v.decodeIfPresent(DictationPerformance.self, forKey: .dictationPerformance)
+        dictationBoundaryResult = try v.decodeIfPresent(DictationBoundaryResult.self, forKey: .dictationBoundaryResult)
         meetingTurns = try v.decodeIfPresent([MeetingTurn].self, forKey: .meetingTurns) ?? []
         transcriptRevision = try v.decodeIfPresent(Int.self, forKey: .transcriptRevision) ?? 0
         summaryTranscriptRevision = try v.decodeIfPresent(Int.self, forKey: .summaryTranscriptRevision)
+        audioCompletedAt = try v.decodeIfPresent(Date.self, forKey: .audioCompletedAt)
         duration = try v.decodeIfPresent(Double.self, forKey: .duration) ?? 0
         status = try v.decodeIfPresent(SessionStatus.self, forKey: .status) ?? .failed
         delivery = try v.decodeIfPresent(DeliveryState.self, forKey: .delivery) ?? .ready
@@ -102,6 +128,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         segments = try v.decodeIfPresent([Segment].self, forKey: .segments) ?? []
         summary = try v.decodeIfPresent(String.self, forKey: .summary) ?? ""
         summaryStatus = try v.decodeIfPresent(SummaryStatus.self, forKey: .summaryStatus) ?? .none
+        summaryFailure = try v.decodeIfPresent(ServiceFailureKind.self, forKey: .summaryFailure)
         summaryEvidenceIDs = try v.decodeIfPresent([String].self, forKey: .summaryEvidenceIDs) ?? []
         summaryEvidence = try v.decodeIfPresent([NoteEvidence].self, forKey: .summaryEvidence) ?? []
         summaryNotesSnapshot = try v.decodeIfPresent(String.self, forKey: .summaryNotesSnapshot) ?? notes

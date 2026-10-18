@@ -51,7 +51,7 @@ struct MeetingWorkspaceView: View {
             if capturing {
                 sourceControls
                 if !model.sourceIssue.isEmpty {
-                    HStack { Text(model.sourceIssue).font(DesignSystem.font(13)); Spacer(); if record.meetingMode == .online { Button("Retry Mac audio") { model.retrySystemAudio() }.buttonStyle(.plain).foregroundStyle(DesignSystem.link) } }
+                    HStack { Text(model.sourceIssue).font(DesignSystem.font(13)); Spacer(); if model.macAudioNeedsRetry { Button("Retry Mac audio") { model.retrySystemAudio() }.buttonStyle(.plain).foregroundStyle(DesignSystem.link) } }
                         .foregroundStyle(DesignSystem.warning).padding(12).background(DesignSystem.warningBackground, in: RoundedRectangle(cornerRadius: 12))
                 }
                 HStack(alignment: .top, spacing: 24) {
@@ -132,7 +132,7 @@ struct MeetingWorkspaceView: View {
     private var summaryPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(record.summaryStatus == .processing ? "Generating notes…" : record.summary.isEmpty ? record.summaryStatus == .failed ? "Notes couldn’t be generated." : "No summary yet" : "Generated notes").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+                Text(record.summaryStatus == .processing ? "Generating notes…" : record.summary.isEmpty ? record.summaryStatus == .failed ? model.notesFailureMessage(record.summaryFailure) : "No summary yet" : "Generated notes").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
                 Spacer()
                 if record.hasText { Button(record.summary.isEmpty ? "Generate notes" : "Regenerate") { model.regenerateNotes(record.id) }.buttonStyle(CirclesButtonStyle()).disabled(record.summaryStatus == .processing || model.isBusy) }
             }

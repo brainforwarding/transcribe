@@ -3,29 +3,28 @@ import TranscribeCore
 
 struct ChipView: View {
     @ObservedObject var model: AppModel
-    @Environment(\.accessibilityReduceMotion) private var reducedMotion
-    @State private var rotating = false
 
     var body: some View {
         HStack(spacing: 8) {
             switch model.chipState {
+            case .starting:
+                ActivitySpinner().frame(width: 16, height: 16).accessibilityHidden(true)
+                Text("Starting…")
+                Spacer(minLength: 0)
+                iconButton("chip-imgIconStop", "Stop starting") { model.finishRecording() }
             case .recording, .warning:
                 DesignIcon(name: model.chipState == .warning ? "chip-imgRecording1" : "chip-imgRecording",
                            size: 6, color: model.chipState == .warning ? DesignSystem.warning : DesignSystem.error)
                 InputMeter(level: model.activeKind == .meeting ? max(model.micLevel, model.systemLevel) : model.micLevel, compact: true)
                 Text(model.chipState == .warning ? "\(max(0, 300 - model.elapsed))s left" : time)
                     .foregroundStyle(model.chipState == .warning ? DesignSystem.warning : DesignSystem.muted)
-                    .frame(width: model.chipState == .warning ? 54 : model.activeKind == .meeting ? 62 : 34, alignment: .leading)
-                Spacer(minLength: 0)
+                    .frame(width: model.chipState == .warning ? 54 : model.activeKind == .meeting ? 62 : 32, alignment: .leading)
+                if model.activeKind == .meeting { Spacer(minLength: 0) }
                 iconButton("chip-imgIconStop", model.activeKind == .meeting ? "Finish meeting" : "Finish · Option") {
                     model.finishRecording()
                 }
             case .transcribing:
-                DesignIcon(name: "chip-imgToneDefaultSizeSm", size: 16, color: DesignSystem.action)
-                    .rotationEffect(.degrees(rotating ? 360 : 0))
-                    .animation(reducedMotion ? nil : .linear(duration: 0.8).repeatForever(autoreverses: false), value: rotating)
-                    .onAppear { rotating = !reducedMotion }
-                    .onChange(of: reducedMotion) { reduced in rotating = !reduced }
+                ActivitySpinner().frame(width: 16, height: 16).accessibilityHidden(true)
                 Text("Transcribing")
                 Spacer(minLength: 0)
                 iconButton("chip-imgIconClose", model.activeKind == .meeting ? "Hide indicator" : "Cancel insertion · Escape") {
@@ -47,12 +46,14 @@ struct ChipView: View {
                 DesignIcon(name: "chip-imgIconClose1", size: 14, color: DesignSystem.muted)
                 Text("Cancelled")
                 Spacer(minLength: 0)
-                linkButton("Recover") { recover() }
+                if model.activeRecord?.canRecover == true { linkButton("Recover") { recover() } }
             case .failed:
                 DesignIcon(name: "chip-imgIconDanger", size: 14, color: DesignSystem.error)
-                Text("Retry needed")
+                Text(model.failedChipLabel)
                 Spacer(minLength: 0)
-                linkButton("Retry") { recover() }
+                if model.activeRecord?.canRecover == true { linkButton("Retry") { recover() } }
+                else if model.failedChipShowsSettings { linkButton("Settings") { model.showSettings?() } }
+                else { linkButton("History") { model.selectedRecordID = model.activeSessionID; model.showLibrary?() } }
             case .silent:
                 DesignIcon(name: "chip-imgIconMicrophone", size: 14, color: DesignSystem.muted)
                 Text("No speech")

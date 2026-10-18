@@ -4,6 +4,8 @@ import Foundation
 public enum ServiceFailureKind: String, Codable, Sendable, Equatable {
     case credentialMissing, credentialLocked, invalidCredential, accessDenied, configuration, insufficientCredits, billingLimit, rateLimited
     case unavailable, invalidResponse, invalidHints, tooLarge, storage
+    /// The service did not answer in time, or stopped at its output limit.
+    case timedOut, truncated
     public var allowsRecoveryAfterRemedy: Bool {
         switch self {
         case .credentialMissing, .credentialLocked, .invalidCredential, .accessDenied, .configuration, .insufficientCredits, .billingLimit: return true
@@ -33,6 +35,8 @@ extension ProviderError {
         case .tooLarge: return .tooLarge
         case .cacheWrite: return .storage
         case .rejected: return .accessDenied
+        case .timedOut: return .timedOut
+        case .truncated: return .truncated
         case .cancelled: return nil
         }
     }

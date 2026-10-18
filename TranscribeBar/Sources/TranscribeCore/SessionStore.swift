@@ -38,7 +38,7 @@ public final class SessionStore {
             do {
                 var record = try decoder.decode(SessionRecord.self, from: Data(contentsOf: dir.appendingPathComponent("record.json")))
                 guard record.id.uuidString == dir.lastPathComponent else { throw CocoaError(.fileReadCorruptFile) }
-                if record.liveMeetingVersion != nil && record.status.interrupted {
+                if record.usesLiveTranscription && record.status.interrupted {
                     // A live record can already hold earlier parts while capture manifests
                     // contain a longer current part. Always reconcile the actual tail.
                     let captured = recoverTracks(in: dir)
@@ -101,10 +101,22 @@ public final class SessionStore {
         return imported
     }
 
+    /// Expire only new, successfully completed recordings with an explicit completion
+    /// timestamp. Old unmanaged audio and failed/cancelled attempts are never purged.
+    public func purgeExpiredAudio(records: [SessionRecord], days: Int, now: Date = Date()) throws {
+        guard days > 0 else { return }
+        for record in records {
+            guard record.status == .complete, record.formattingFailure == nil, record.hasText,
+                  let completed = record.audioCompletedAt,
+                  now.timeIntervalSince(completed) >= Double(days) * 86_400 else { continue }
+            try cleanAudio(for: record)
+        }
+    }
+
     /// Called only after durable, complete text, capture completion and final readers.
     /// Delete only referenced artifacts belonging to this UUID directory.
     public func cleanAudio(for record: SessionRecord) throws {
-        guard record.status == .complete, !record.captureIncomplete, record.hasSealedMeetingAudio else { return }
+        guard record.status == .complete, record.formattingFailure == nil, !record.captureIncomplete, record.hasSealedMeetingAudio else { return }
         let owned = directory(for: record.id).standardizedFileURL.path + "/"
         for url in record.tracks.flatMap({ $0.spans.map(\.url) }) {
             guard url.standardizedFileURL.path.hasPrefix(owned) else { continue }

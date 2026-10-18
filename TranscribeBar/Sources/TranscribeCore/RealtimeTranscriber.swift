@@ -77,15 +77,22 @@ struct LiveTranscriptionEvent: Sendable {
     }
 }
 
+public enum LiveTranscriptionModel: String, Sendable {
+    case live = "gpt-live-transcribe"
+    case committed = "gpt-transcribe"
+}
+
 enum LiveProtocol {
     static let model = "gpt-live-transcribe"
     static let minimumCommitDuration = 0.25 // conservatively exceeds the 100 ms empty/short buffer boundary
     static let maximumTurnDuration = 10.0
     static let quietCommitDuration = 0.7
     static let signalRMS = 0.0001
-    static func configuration(languages: [String], keywords: [String], eventID: String) throws -> Data {
+    static func configuration(languages: [String], keywords: [String], eventID: String,
+                              model: LiveTranscriptionModel = .live) throws -> Data {
         try checkedHints(languages: languages, keywords: keywords)
-        var transcription: [String: Any] = ["model": model, "delay": "low"]
+        var transcription: [String: Any] = ["model": model.rawValue]
+        if model == .live { transcription["delay"] = "low" }
         if !languages.isEmpty { transcription["languages"] = languages }
         if !keywords.isEmpty { transcription["keywords"] = keywords }
         return try JSONSerialization.data(withJSONObject: ["type": "session.update", "event_id": eventID,

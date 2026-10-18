@@ -49,10 +49,25 @@ formatting is saved before insertion; the raw transcript remains in the local re
 The owner verified natural paragraph formatting with real dictation; broader formatting quality remains owner-tested. Dictionary terms
 remain optional recognition hints. Meetings and CLI transcription do not use this second pass.
 
+**Local speed experiment:** Faster dictation is one optional switch for OpenAI.
+It recognizes overlapping chunks while you speak, then makes one final text request
+to assemble them and add punctuation, using Luna's Fast tier. There is no audio
+boundary-recheck stage. Incomplete background recognition falls back to ordinary
+whole-recording transcription and formatting, preserving the original saved turns.
+The approximate audio overhead during continuous speech is 1.1×. The Live selector
+and performance footer have been removed. [Single-prompt notes](../docs/DICTATION-SINGLE-PASS.md)
+record the real four-minute trial, the correction and current validation.
+
+Audio is kept for seven days after successful completion by default, with 30 days
+or Forever also available. Failed/cancelled/partial attempts remain recoverable and
+are not expired. Raw capture files cover the entire recording independently of ASR.
+
 Dictation history shows full selectable text grouped by day, with each recording's
 time and a compact Copy control that briefly confirms successful copying. Direct Retry or Recover appears only when applicable. Dictation has no Export/Rename menu.
-Empty inactive recordings with no recovery or account action are hidden from the view;
-stored history and audio are retained.
+Failed and empty attempts remain visible in history with an explanation. Starting
+checks that the selected device is a connected input and waits up to three seconds
+for audio to be saved before showing Recording. Missing audio stops capture and
+directs you to check the microphone; Retry appears only when saved audio can be recovered.
 
 Service failures show one brief message with a useful action. Explicitly exhausted
 credits open OpenAI billing; spend/usage limits direct to billing, and Team account

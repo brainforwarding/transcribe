@@ -123,22 +123,78 @@ struct StatusPill: View {
     }
 }
 
+/// Draw track and arc separately so template tinting cannot hide the motion.
+/// A clock-driven task also works while the floating panel is not the key window.
+struct ActivitySpinner: View {
+    @Environment(\.accessibilityReduceMotion) private var reducedMotion
+    @State private var phase = 0.0
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(DesignSystem.action.opacity(0.16), lineWidth: 1.8)
+            Circle().trim(from: 0, to: 0.68)
+                .stroke(DesignSystem.action, style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
+                .rotationEffect(.degrees(phase - 90))
+        }
+        .padding(1)
+        .task(id: reducedMotion) {
+            guard !reducedMotion else { phase = 0; return }
+            while !Task.isCancelled {
+                phase = ProcessInfo.processInfo.systemUptime.truncatingRemainder(dividingBy: 0.8) * 450
+                do { try await Task.sleep(nanoseconds: 33_333_333) } catch { return }
+            }
+        }
+    }
+}
+
 struct InputMeter: View {
     let level: Double
     var compact = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
-    private let weights: [Double] = [0.25, 0.62, 0.38, 1, 0.56, 0.75, 0.31]
+    @State private var targetLevel = 0.0
+    @State private var smoothedLevel = 0.0
+    @State private var history = Array(repeating: 0.0, count: 23)
+    private var width: CGFloat { compact ? 44 : 92 }
+    private var height: CGFloat { compact ? 16 : 32 }
+    private var normalizedLevel: Double { level.isFinite ? min(1, max(0, level)) : 0 }
+
     var body: some View {
-        HStack(spacing: compact ? 4 : 4) {
-            ForEach(Array((compact ? weights : [0.2,0.43,0.3,0.77,0.56,1,0.67,0.4,0.87,0.6,0.27,0.5,0.8,0.33]).enumerated()), id: \.offset) { _, weight in
-                Capsule().fill(DesignSystem.action)
-                    .frame(width: compact ? 2 : 3,
-                           height: max(2, (compact ? 16 : 32) * min(1, max(0, level)) * (reducedMotion ? 1 : weight)))
+        Group {
+            if reducedMotion {
+                Capsule().fill(DesignSystem.action.opacity(0.15))
+                    .frame(height: 3)
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(DesignSystem.action)
+                            .frame(width: width * normalizedLevel, height: 3)
+                    }
+            } else {
+                HStack(spacing: 1) {
+                    ForEach(Array(history.suffix(compact ? 15 : 23).enumerated()), id: \.offset) { index, sample in
+                        Capsule().fill(DesignSystem.action.opacity(0.35 + 0.65 * Double(index + 1) / Double(compact ? 15 : 23)))
+                            .frame(width: compact ? 2 : 3,
+                                   height: 2 + (height - 2) * pow(sample, 0.65))
+                    }
+                }
+                .animation(.linear(duration: 0.05), value: history)
             }
         }
-        .frame(width: compact ? 44 : 92, height: compact ? 16 : 32, alignment: .leading)
+        .frame(width: width, height: height, alignment: .leading)
+        .onAppear { targetLevel = normalizedLevel }
+        .onChange(of: level) { _ in targetLevel = normalizedLevel }
+        .task(id: reducedMotion) {
+            guard !reducedMotion else { return }
+            history = Array(repeating: 0, count: 23); smoothedLevel = 0
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+                // Fast attack follows speech; slower release avoids a twitchy display.
+                // Every bar is a recent measured level, including quiet intervals.
+                let response = targetLevel > smoothedLevel ? 0.8 : 0.35
+                smoothedLevel += (targetLevel - smoothedLevel) * response
+                history.removeFirst(); history.append(smoothedLevel)
+            }
+        }
         .accessibilityLabel("Audio input")
-        .accessibilityValue(level > 0.01 ? "Sound detected" : "No input")
+        .accessibilityValue(normalizedLevel > 0.01 ? "Sound detected" : "No input")
     }
 }
 

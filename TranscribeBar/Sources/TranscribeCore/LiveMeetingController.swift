@@ -21,17 +21,21 @@ public final class LiveMeetingController: @unchecked Sendable {
     private let signals: AsyncStream<Void>
     private let signal: AsyncStream<Void>.Continuation
     private let engine: Engine
+    private let finishTimeout: UInt64
     public init(realtimeURL: URL, config: OpenAIConfig, sources: [Source], languages: [String] = [],
                 keywords: [String] = [], onPersist: @escaping Persist,
                 onDraft: @escaping @Sendable (LiveMeetingDraft) -> Void = { _ in },
                 onIssue: @escaping @Sendable (TranscriptionIssue) -> Void = { _ in },
-                socketFactory: SocketFactory? = nil) {
+                socketFactory: SocketFactory? = nil, finishTimeout: TimeInterval = 10,
+                model: LiveTranscriptionModel = .live, pauseAwareDictation: Bool = false) {
+        self.finishTimeout = UInt64((finishTimeout.isFinite ? min(10, max(0.1, finishTimeout)) : 10) * 1_000_000_000)
         var continuation: AsyncStream<Void>.Continuation!
         signals = AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
         signal = continuation
         engine = Engine(url: realtimeURL, config: config, sources: sources, languages: languages,
                         keywords: keywords, persist: onPersist, draft: onDraft, issue: onIssue,
-                        factory: socketFactory ?? { NativeLiveSocket(request: $0, session: .shared) })
+                        factory: socketFactory ?? { NativeLiveSocket(request: $0, session: .shared) }, model: model,
+                        pauseAwareDictation: pauseAwareDictation)
     }
     public func start() async {
         lock.withLock {
@@ -70,7 +74,7 @@ public final class LiveMeetingController: @unchecked Sendable {
             if !finishing {
                 finishing = true; queue.append(.stop)
                 stopTimer = Task { [weak self] in
-                    do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { return }
+                    do { try await Task.sleep(nanoseconds: self?.finishTimeout ?? 10_000_000_000) } catch { return }
                     guard let self else { return }
                     await self.engine.closeTransport(); self.enqueue(.deadline)
                 }
@@ -129,6 +133,8 @@ public final class LiveMeetingController: @unchecked Sendable {
             var expiresAt: Double?
             var beforeReady: [CapturedAudioFrame] = []
             var open: MeetingTurn?
+            var recent: [CapturedAudioFrame] = []
+            var replay: [CapturedAudioFrame] = []
             var lastSignalEnd: Double?
             var pcmFrames = 0
             var commitQueue: [Int] = []
@@ -150,6 +156,8 @@ public final class LiveMeetingController: @unchecked Sendable {
         let draft: @Sendable (LiveMeetingDraft) -> Void
         let issue: @Sendable (TranscriptionIssue) -> Void
         let factory: SocketFactory
+        let model: LiveTranscriptionModel
+        let pauseAwareDictation: Bool
         var connections: [Source: Connection] = [:]
         var turns: [MeetingTurn] = []
         var ordinals: [Source: Int] = [:]
@@ -161,9 +169,12 @@ public final class LiveMeetingController: @unchecked Sendable {
         var receive: (@Sendable (Source, UUID, LiveTranscriptionEvent?, ServiceFailureKind?) -> Void)?
         init(url: URL, config: OpenAIConfig, sources: [Source], languages: [String], keywords: [String],
              persist: @escaping Persist, draft: @escaping @Sendable (LiveMeetingDraft) -> Void,
-             issue: @escaping @Sendable (TranscriptionIssue) -> Void, factory: @escaping SocketFactory) {
+             issue: @escaping @Sendable (TranscriptionIssue) -> Void, factory: @escaping SocketFactory,
+             model: LiveTranscriptionModel, pauseAwareDictation: Bool) {
             self.url = url; self.config = config; self.sources = sources; self.languages = languages; self.keywords = keywords
             self.persist = persist; self.draft = draft; self.issue = issue; self.factory = factory
+            self.model = model
+            self.pauseAwareDictation = pauseAwareDictation
         }
         func start(receive: @escaping @Sendable (Source, UUID, LiveTranscriptionEvent?, ServiceFailureKind?) -> Void) async {
             self.receive = receive
@@ -188,7 +199,7 @@ public final class LiveMeetingController: @unchecked Sendable {
                     }
                 }
                 let id = UUID().uuidString; connection.sentEvents.insert(id)
-                let configuration = try LiveProtocol.configuration(languages: languages, keywords: keywords, eventID: id)
+                let configuration = try LiveProtocol.configuration(languages: languages, keywords: keywords, eventID: id, model: model)
                 // A slow second handshake must not stall the first source's event
                 // processing. Audio still waits for its own configuration ACK.
                 connection.configuring = Task {
@@ -236,25 +247,46 @@ public final class LiveMeetingController: @unchecked Sendable {
             }
             if let open = c.open, abs(frame.offset - open.end) > 1 / 8_000 {
                 // End at the last real sample and discard this generation's converter tail.
-                await commit(frame.source, stopping: true)
+                await commit(frame.source, stopping: true, reason: .discontinuity)
                 guard connections[frame.source] === c else { return }
-                c.encoder.reset()
+                c.encoder.reset(); c.recent = []; c.replay = []
             }
+            var prefix: [CapturedAudioFrame] = []
             if c.open == nil {
                 let idx = ordinals[frame.source] ?? (frame.source.rawValue * 1_000_000_000)
                 ordinals[frame.source] = idx + 1
-                c.open = MeetingTurn(idx: idx, source: frame.source, start: frame.offset, end: frame.offset + frame.duration)
+                if pauseAwareDictation, let last = c.replay.last,
+                   abs(last.offset + last.duration - frame.offset) <= 1 / 8_000 { prefix = c.replay }
+                c.replay = []
+                c.open = MeetingTurn(idx: idx, source: frame.source, start: prefix.first?.offset ?? frame.offset, end: frame.offset + frame.duration)
                 c.pcmFrames = 0; c.lastSignalEnd = nil
             } else { c.open?.end = frame.offset + frame.duration }
             if frame.rms > LiveProtocol.signalRMS { c.lastSignalEnd = frame.offset + frame.duration }
             do {
+                for context in prefix {
+                    let bytes = try c.encoder.encode(context)
+                    if !bytes.isEmpty { try await sendAudio(bytes, source: frame.source, connection: c) }
+                }
                 let encoded = try c.encoder.encode(frame)
                 if !encoded.isEmpty { try await sendAudio(encoded, source: frame.source, connection: c) }
                 guard connections[frame.source] === c, let open = c.open else { return }
-                if open.end - open.start >= LiveProtocol.maximumTurnDuration
-                    || (c.lastSignalEnd.map { open.end - $0 >= LiveProtocol.quietCommitDuration } == true
-                        && open.end - open.start >= LiveProtocol.minimumCommitDuration) {
-                    await commit(frame.source, stopping: false)
+                if pauseAwareDictation {
+                    c.recent.append(frame)
+                    let cutoff = open.end - 2
+                    c.recent.removeAll { $0.offset + $0.duration <= cutoff }
+                    if let first = c.recent.first, first.offset < cutoff {
+                        let drop = min(first.pcmFloat32.count / 4, Int(((cutoff - first.offset) * 16_000).rounded()))
+                        c.recent[0] = CapturedAudioFrame(source: first.source, offset: first.offset + Double(drop) / 16_000,
+                            pcmFloat32: Data(first.pcmFloat32.dropFirst(drop * 4)), rms: first.rms)
+                    }
+                }
+                let duration = open.end - open.start
+                let quiet = c.lastSignalEnd.map { open.end - $0 } ?? (pauseAwareDictation ? duration : 0)
+                // After the 10 s target, prefer even a short pause over cutting speech.
+                let requiredQuiet = pauseAwareDictation && duration >= 10 ? 0.3 : LiveProtocol.quietCommitDuration
+                let paused = quiet >= requiredQuiet && duration >= LiveProtocol.minimumCommitDuration
+                if paused || duration >= (pauseAwareDictation ? 20 : LiveProtocol.maximumTurnDuration) {
+                    await commit(frame.source, stopping: false, reason: paused ? .pause : .forced)
                 }
             } catch { await invalidate(frame.source, failure: (error as? ProviderError)?.failureKind ?? .unavailable) }
         }
@@ -269,7 +301,7 @@ public final class LiveMeetingController: @unchecked Sendable {
                 c.pcmFrames += bytes.count / 2
             }
         }
-        private func commit(_ source: Source, stopping: Bool) async {
+        private func commit(_ source: Source, stopping: Bool, reason: MeetingTurn.EndReason = .stopped) async {
             guard let c = connections[source], var open = c.open else { return }
             do {
                 // Seal the resampler tail into THIS interval. Carrying its filter
@@ -282,9 +314,12 @@ public final class LiveMeetingController: @unchecked Sendable {
                     await invalidate(source, failure: .unavailable, report: false); return
                 }
                 open.state = .pending
+                open.endReason = reason
                 let next = turns + [open]
                 try await persist(next); turns = next
                 c.open = nil; c.pcmFrames = 0; c.lastSignalEnd = nil
+                c.replay = pauseAwareDictation && reason == .forced ? c.recent : []
+                c.recent = []
                 c.commitQueue.append(open.idx)
                 let id = UUID().uuidString; c.sentEvents.insert(id)
                 try await c.socket.send(LiveProtocol.event("input_audio_buffer.commit", id: id))

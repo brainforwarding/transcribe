@@ -83,6 +83,13 @@ private final class Fixture {
     let processing = Gate()
     let delivery = Gate()
     let formatting = Gate()
+    let boundary = Gate()
+    var blocksBoundary = false
+    var boundaryFails = false
+    var boundarySaveFails = false
+    var boundaryRequests = 0
+    var assemblyRequests = 0
+    var boundaryText: String?
     var formatterEnabled = false
     var blocksFormatting = false
     var formattingCancelled = false
@@ -122,9 +129,13 @@ private final class Fixture {
     var liveIssue: (@Sendable (TranscriptionIssue) -> Void)?
     var liveDraft: (@Sendable (LiveMeetingDraft) -> Void)?
     var liveRecoveries = 0
+    var liveMode: DictationPerformance.Mode?
     var liveConfirmedSaveFails = false
     var recoveredInput: [MeetingTurn] = []
     var levelCallback: (@Sendable (Source, Double) -> Void)?
+    var healthCallback: (@Sendable (CaptureHealth) -> Void)?
+    var captureHasAudio = true
+    var captureStartFails = false
 
     init(legacyCredential: CredentialSession.ReadResult = .missing, storedProvider: ConnectionProvider? = nil,
          existingConsent: Bool = false, liveMeetingEnabled: Bool = false,
@@ -145,21 +156,25 @@ private final class Fixture {
         if let storedProvider { preferences.set(storedProvider.rawValue, forKey: "connectionProvider") }
         preferences.set(existingConsent, forKey: "consentAccepted")
         preferences.set(false, forKey: "keepAudio")
+        preferences.set(0, forKey: "audioRetentionDays")
         preferences.set(false, forKey: "includeSummary")
         preferences.set(folder.appendingPathComponent("exports").path, forKey: "saveFolderPath")
-        var operations = AppModel.Operations(makeCapture: { [self] directory, _, _, level, _, _ in
+        var operations = AppModel.Operations(makeCapture: { [self] directory, _, _, level, health, _ in
             let raw = directory.appendingPathComponent("mic-test.wav")
             // Fake capture has real owned recovery data so cleanup assertions inspect disk.
-            try! Data("owned recovery audio fixture".utf8).write(to: raw)
-            let track = SessionAudioTrack(source: .mic, spans: [AudioSpan(url: raw, offset: 0, duration: 2)])
-            try! JSONEncoder().encode(track).write(to: directory.appendingPathComponent("mic-capture.json"))
-            artifact = raw; levelCallback = level
+            let tracks = captureHasAudio ? [SessionAudioTrack(source: .mic, spans: [AudioSpan(url: raw, offset: 0, duration: 2)])] : []
+            if let track = tracks.first {
+                try! Data("owned recovery audio fixture".utf8).write(to: raw)
+                try! JSONEncoder().encode(track).write(to: directory.appendingPathComponent("mic-capture.json"))
+                artifact = raw
+            }
+            levelCallback = level; healthCallback = health
             return AppModel.CaptureSession(start: { [self] in
                 starts += 1; await startup.wait()
+                if captureStartFails { throw CheckFailure(description: "Microphone unavailable") }
             }, stop: { [self] in
                 stops += 1
-                return AppModel.CaptureSession.Output(tracks: [SessionAudioTrack(source: .mic,
-                    spans: [AudioSpan(url: raw, offset: 0, duration: 2)])], issues: [])
+                return AppModel.CaptureSession.Output(tracks: tracks, issues: [])
             }, retrySystemAudio: {})
         }, transcribe: { [self] _, _, config in
             seenConfig = config
@@ -171,6 +186,7 @@ private final class Fixture {
             guard let credential = credentialVault.get(provider) else { throw CheckFailure(description: "Missing synthetic credential") }
             return OpenAIConfig(baseURL: provider.baseURL, authValue: "Bearer " + credential)
         }, save: { [self] store, record in
+            if boundarySaveFails && record.dictationBoundaryResult != nil { throw CocoaError(.fileWriteOutOfSpace) }
             if liveConfirmedSaveFails && record.meetingTurns.contains(where: { $0.state == .confirmed }) { throw CocoaError(.fileWriteOutOfSpace) }
             if recordingSaveFails && record.status == .recording { throw CocoaError(.fileWriteOutOfSpace) }
             if stopSaveFails && !record.tracks.isEmpty && !record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
@@ -206,7 +222,14 @@ private final class Fixture {
             return DictationFormatResult(text: formattedText, failure: formatFailure)
         })
         if liveMeetingEnabled {
-            operations.makeLiveMeeting = { [self] _, _, _, persist, draft, issue in
+            let fixtureFormat = operations.format!
+            operations.assemble = { turns, credentials in
+                self.assemblyRequests += 1
+                return try await fixtureFormat(turns.sorted { $0.start < $1.start }.map(\.text).joined(separator: " "), credentials)
+            }
+            operations.makeLiveMeeting = { [self] record, _, config, persist, draft, issue in
+                seenConfig = config
+                liveMode = record.dictationPerformance?.mode
                 livePersist = persist; liveDraft = draft; liveIssue = issue
                 return AppModel.MeetingSession(start: {}, offer: { _ in }, finish: { [] }, cancel: { [] })
             }
@@ -226,7 +249,7 @@ private final class Fixture {
         model.micGranted = true; model.acceptConsent()
     }
     func close() async {
-        startup.release(); processing.release(); delivery.release(); formatting.release()
+        startup.release(); processing.release(); delivery.release(); formatting.release(); boundary.release()
         await model?.prepareToQuit()
         model = nil; verificationSession.invalidateAndCancel()
         preferences.removePersistentDomain(forName: preferenceDomain)
@@ -270,6 +293,233 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
+            ("Chunked dictation uses one assembly call and no audio review", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true; f.formatterEnabled = true
+                try await f.beginRecording()
+                try await f.livePersist?([
+                    .init(idx: 0, source: .mic, start: 0, end: 1.5, state: .confirmed, text: "Saved", endReason: .forced),
+                    .init(idx: 1, source: .mic, start: 1, end: 2, state: .confirmed, text: "speech", endReason: .stopped)])
+                f.model.finishRecording()
+                try await until("single assembly delivered") { f.model.phase == .done }
+                try check(f.transcriptionRequests == 0 && f.liveRecoveries == 0 &&
+                          f.formatterRequests == 1 && f.insertions == 1 && f.model.records[0].liveDictationVersion == 3,
+                          "normal completion must perform exactly one text assembly request and no audio rechecks")
+                await f.close()
+            }),
+            ("Failed chunk assembly retains audio and never pastes provisional overlap", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true; f.formatterEnabled = true; f.formatFailure = .unavailable
+                try await f.beginRecording()
+                try await f.livePersist?([.init(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")])
+                f.model.finishRecording()
+                try await until("assembly failure saved") { f.model.phase == .done }
+                try check(f.formatterRequests == 1 && f.insertions == 0 && f.audioExists() && f.model.records[0].formattingFailure == .unavailable,
+                          "failed one-pass assembly retains the original audio and cannot insert provisional text")
+                await f.close()
+            }),
+            ("Audio retention defaults to seven days and can preserve forever", { _ in
+                let f = try Fixture()
+                f.preferences.removeObject(forKey: "audioRetentionDays")
+                let m = AppModel(store: f.store, operations: nil, preferences: f.preferences, initializeSystemState: false)
+                try check(m.audioRetentionDays == 7 && m.keepAudio, "default must retain audio even after successful dictation")
+                m.audioRetentionDays = -1
+                try check(m.keepAudio && f.preferences.integer(forKey: "audioRetentionDays") == -1, "forever preference must persist")
+                await f.close()
+            }),
+            ("Background experiment uses a persisted recording mode independently of the toggle", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true
+                try await f.beginRecording()
+                try check(f.liveMode == .background && f.model.activeRecord?.liveDictationVersion == 3,
+                          "A recording must snapshot its selected background method")
+                try await f.livePersist?([MeetingTurn(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")])
+                f.model.fasterDictation = false
+                f.model.finishRecording()
+                try await until("background recording complete") { f.model.phase == .done }
+                try check(f.transcriptionRequests == 0 && f.model.records[0].dictationPerformance?.mode == .background && f.insertions == 1,
+                          "Changing the preference cannot switch an already captured recording to a different pipeline")
+                await f.close()
+            }),
+            ("Unvalidated Team relay keeps standard dictation during the experiment", { _ in
+                let f = try Fixture(legacyCredential: .value("local-team-fixture"), storedProvider: .team, liveMeetingEnabled: true)
+                f.model.fasterDictation = true
+                try await f.beginProcessing(); f.processing.release()
+                try await until("team standard capture complete") { f.model.phase == .done }
+                try check(f.model.records[0].liveDictationVersion == nil && f.model.records[0].dictationPerformance?.mode == .standard &&
+                          f.transcriptionRequests == 1 && f.livePersist == nil,
+                          "Experimental methods cannot silently use a relay that has not passed this comparison")
+                await f.close()
+            }),
+            ("Live dictation is opt-in and switching it off restores standard capture", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                try check(!f.model.fasterDictation, "Existing users must retain standard dictation by default")
+                f.model.fasterDictation = true
+                try check(f.preferences.bool(forKey: "fasterDictation"), "Experiment choice must persist locally")
+                f.model.fasterDictation = false
+                try await f.beginProcessing(); f.processing.release()
+                try await until("standard dictation complete") { f.model.phase == .done }
+                try check(f.model.records[0].liveDictationVersion == nil && f.transcriptionRequests == 1 &&
+                          f.liveRecoveries == 0 && f.livePersist == nil,
+                          "Off must use the original transcription path without a live connection")
+                await f.close()
+            }),
+            ("Live dictation skips full ASR and shares durable formatting and final-caret delivery", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true; f.formatterEnabled = true; f.blocksFormatting = true
+                try await f.beginRecording()
+                guard let persist = f.livePersist else { throw CheckFailure(description: "Missing live dictation") }
+                let turn = MeetingTurn(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")
+                try await persist([turn])
+                try check(f.model.activeRecord?.transcript == "Saved speech" && f.model.activeRecord?.rawTranscript == "Saved speech" &&
+                          f.insertions == 0 && f.formatterRequests == 0,
+                          "Confirmed words must be plain durable dictation without insertion during capture")
+                f.model.finishRecording(); f.now += 1.2
+                try await until("live formatting") { f.formatting.entered }
+                try check(f.rawSavedBeforeFormatting && f.transcriptionRequests == 0 && f.liveRecoveries == 0,
+                          "Sealed live audio must go directly to formatting with no file transcription")
+                f.currentFocus = "Field B"; f.now += 0.3; f.formatting.release()
+                try await until("live dictation delivered") { f.model.phase == .done }
+                let saved = try f.store.load()[0]
+                try check(saved.status == .complete && saved.transcript == "Saved speech." && saved.rawTranscript == "Saved speech" &&
+                          f.insertions == 1 && f.deliveredFocus == "Field B" && saved.exportURL == nil,
+                          "Live dictation must use guarded current-caret delivery without meeting export")
+                try check(saved.dictationPerformance?.mode == .background && saved.dictationPerformance?.usedRecovery == false &&
+                          abs((saved.dictationPerformance?.stopToReady ?? 0) - 1.5) < 0.001,
+                          "Local stop-to-ready timing must include finalization and formatting")
+                await f.close()
+            }),
+            ("Failed background recognition uses whole audio and one ordinary editor", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true; f.formatterEnabled = true
+                f.finalText = "17 teachers and 70 seats"
+                f.formattedText = "17 teachers and 70 seats."
+                f.processing.release()
+                try await f.beginRecording()
+                let original = MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "First part")
+                try await f.livePersist?([original])
+                f.model.finishRecording()
+                try await until("live missing tail recovered") { f.model.phase == .done }
+                let saved = try f.store.load()[0]
+                try check(f.liveRecoveries == 0 && f.transcriptionRequests == 1 &&
+                          saved.meetingTurns == [original] && saved.status == .complete && saved.liveDictationVersion == nil,
+                          "Failed recognition must use the established whole-recording path and preserve original turns")
+                try check(saved.dictationPerformance?.usedRecovery == true && f.formatterRequests == 1 && f.assemblyRequests == 0 && f.insertions == 1
+                          && saved.rawTranscript == f.finalText && saved.transcript == f.formattedText,
+                          "Fallback uses one ordinary editor without stitching clipped recovery text")
+                await f.close()
+            }),
+            ("Live connection failure falls back to saved audio", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true
+                f.processing.release()
+                try await f.beginRecording()
+                f.liveIssue?(TranscriptionIssue(source: .mic, userMessage: "Live connection unavailable", failureKind: .unavailable))
+                try await until("live connection failure persisted") { f.model.activeRecord?.transcriptionIssues.isEmpty == false }
+                f.model.finishRecording()
+                try await until("full saved-audio recovery") { f.model.phase == .done }
+                try check(f.liveRecoveries == 0 && f.transcriptionRequests == 1 && f.model.records[0].status == .complete &&
+                          f.model.records[0].dictationPerformance?.usedRecovery == true && f.insertions == 1,
+                          "An unavailable live service must retain recording and recover all captured audio")
+                await f.close()
+            }),
+            ("Cancelled live dictation preserves audio and historical recovery never inserts", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true
+                try await f.beginRecording()
+                try await f.livePersist?([MeetingTurn(idx: 0, source: .mic, start: 0, end: 1)])
+                f.model.cancelDictation()
+                try await until("cancelled live capture") { f.model.phase == .done }
+                let id = f.model.records[0].id
+                try check(f.model.records[0].status == .cancelled && f.audioExists() && f.liveRecoveries == 0 && f.insertions == 0,
+                          "Escape must retain captured audio without recovery or insertion")
+                f.model.retry(id)
+                f.processing.release()
+                try await until("historical live recovery") { f.model.phase == .done }
+                try check(f.model.records[0].status == .complete && f.model.records[0].hasText &&
+                          f.liveRecoveries == 0 && f.transcriptionRequests == 1 && f.insertions == 0,
+                          "Explicit recovery must not insert into the current field")
+                await f.close()
+            }),
+            ("Incomplete background fallback retains audio and blocks assembly and insertion", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true; f.finalComplete = false; f.formatterEnabled = true
+                f.processing.release()
+                try await f.beginRecording()
+                f.model.finishRecording()
+                try await until("incomplete fallback") { f.model.phase == .done }
+                try check(f.model.records[0].status == .partial && f.audioExists() && f.insertions == 0
+                          && f.assemblyRequests == 0 && f.formatterRequests == 0,
+                          "Incomplete fallback must keep audio and never paste uncertain text")
+                await f.close()
+            }),
+            ("Cancellation during background fallback blocks late text and insertion", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true
+                try await f.beginRecording()
+                f.model.finishRecording()
+                try await until("fallback started") { f.processing.entered }
+                f.model.cancelDictation(); f.processing.release()
+                try await until("fallback cancelled") { f.model.phase == .done }
+                try check(f.model.records[0].status == .cancelled && f.audioExists() && f.insertions == 0
+                          && f.assemblyRequests == 0 && f.formatterRequests == 0,
+                          "Late fallback completion must not override cancellation or remove audio")
+                await f.close()
+            }),
+            ("Escape during live formatting retains original words and blocks late delivery", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.fasterDictation = true; f.formatterEnabled = true; f.blocksFormatting = true
+                try await f.beginRecording()
+                try await f.livePersist?([MeetingTurn(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")])
+                f.model.finishRecording()
+                try await until("live formatting blocked") { f.formatting.entered }
+                f.model.cancelDictation(); f.formatting.release()
+                try await until("live formatting cancelled") { f.model.phase == .done }
+                let saved = try f.store.load()[0]
+                try check(saved.status == .cancelled && saved.transcript == "Saved speech" && f.audioExists() && f.insertions == 0 && f.cleanups == 0,
+                          "Cancelled formatting cannot overwrite durable words, delete audio or insert late")
+                await f.close()
+            }),
+            ("Missing microphone remains visible without transcription or futile retry", { f in
+                f.captureHasAudio = false; f.captureStartFails = true
+                f.model.startDictation()
+                try check(f.model.phase == .starting && f.model.chipState == .starting,
+                          "Startup must not claim recording before capture confirms saved audio")
+                f.startup.release()
+                try await until("missing microphone failure") { f.model.phase == .error }
+                let record = f.model.records[0]
+                try check(record.status == .failed && record.captureIncomplete && !record.canRecover && !record.hasText,
+                          "No captured audio must persist as a failed attempt without a retry")
+                try check(f.model.failedChipLabel == "No audio captured" && f.model.failedChipShowsSettings,
+                          "Chip must explain missing audio and offer microphone settings")
+                let reloaded = try f.store.load()
+                try check(f.model.filteredRecords.contains(where: { $0.id == record.id }) &&
+                          reloaded.contains(where: { $0.id == record.id && $0.status == .failed }),
+                          "Failure must remain in history and survive reload")
+                try check(f.transcriptionRequests == 0 && f.formatterRequests == 0 && f.insertions == 0 && f.cleanups == 0,
+                          "Empty capture must never call transcription, formatting, insertion or cleanup")
+            }),
+            ("Microphone error during startup stops before recording", { f in
+                f.captureHasAudio = false
+                f.model.startDictation()
+                f.healthCallback?(CaptureHealth(source: .mic, state: .interrupted, message: "No microphone is connected."))
+                try await until("startup failure stops capture") { f.model.phase == .stopping }
+                f.startup.release()
+                try await until("startup failure finalized") { f.model.phase == .error }
+                try check(f.stops == 1 && f.transcriptionRequests == 0 && f.model.micHealth?.state == .interrupted &&
+                          f.model.records[0].issues.contains("No microphone is connected."),
+                          "Early failure must not be lost when the start operation finishes")
+            }),
+            ("Unplugged microphone preserves audio captured before interruption", { f in
+                try await f.beginRecording()
+                f.healthCallback?(CaptureHealth(source: .mic, state: .interrupted, message: "Microphone disconnected."))
+                try await until("interrupted capture processing") { f.processing.entered }
+                f.processing.release()
+                try await until("interrupted capture saved") { f.model.phase == .done }
+                try check(f.audioExists() && f.model.records[0].status == .partial &&
+                          f.model.records[0].captureIncomplete,
+                          "Disconnect must stop recording and retain already captured audio")
+            }),
             ("Copy feedback requires a successful clipboard write", { f in
                 try check(!f.model.copyTranscript(UUID()) && f.copies == 0, "Missing record must not claim copy success")
                 let emptyID = try f.addHistoricalRecord(status: .failed)

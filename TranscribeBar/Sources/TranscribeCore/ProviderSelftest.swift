@@ -389,18 +389,39 @@ private final class TranscriptionTests {
         XCTAssertEqual(count, 5)
         XCTAssertEqual(result.evidence.first?.turnIDs, ["turn-2"])
     }
-    func testNotesRejectInventedEvidence() async throws {
+    func testNotesDropInventedEvidenceButKeepNotes() async throws {
         let turn = Segment(start: 0, end: 1, label: "You", text: "Discussion", source: .mic, idx: 0)
-        StubProtocol.handler = { _ in
-            let note = GeneratedNotes(text: "Invented", evidence: [NoteEvidence(id: "claim", text: "Invented", turnIDs: ["turn-999"])])
+        var body = ""
+        StubProtocol.handler = { request in
+            body = self.body(request)
+            let note = GeneratedNotes(text: "Notes", evidence: [
+                NoteEvidence(id: "invented", text: "Invented", turnIDs: ["turn-999"]),
+                NoteEvidence(id: "mixed", text: "Mixed", turnIDs: ["turn-999", "turn-0"]),
+                NoteEvidence(id: "mixed", text: "Repeated id", turnIDs: ["turn-0"]),
+            ])
             let encoded = String(decoding: try JSONEncoder().encode(note), as: UTF8.self)
-            return (200, try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": encoded]]]]))
+            return (200, try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": encoded], "finish_reason": "stop"]]]))
         }
-        do {
-            _ = try await generateNotes(transcription: FinalTranscription(text: "", segments: [turn], complete: true, issues: []),
-                originalNotes: "", config: config, session: transport)
-            XCTFail("Expected invented evidence rejection")
-        } catch let error as ProviderError { XCTAssertEqual(error, .invalidResponse) }
+        let result = try await generateNotes(transcription: FinalTranscription(text: "", segments: [turn], complete: true, issues: []),
+            originalNotes: "", config: config, session: transport)
+        XCTAssertEqual(result.text, "Notes")
+        XCTAssertEqual(result.evidence.map(\.id), ["mixed"])
+        XCTAssertEqual(result.evidence.first?.turnIDs, ["turn-0"])
+        XCTAssertTrue(body.contains("\"json_schema\"") && body.contains("\"strict\":true") && body.contains("max_completion_tokens"))
+    }
+    func testNotesReportTruncationAndEmptyNotes() async throws {
+        let turn = Segment(start: 0, end: 1, label: "You", text: "Discussion", source: .mic, idx: 0)
+        let transcript = FinalTranscription(text: "", segments: [turn], complete: true, issues: [])
+        for (finish, text, expected) in [("length", "Cut", ProviderError.truncated), ("stop", " ", ProviderError.invalidResponse)] {
+            StubProtocol.handler = { _ in
+                let encoded = String(decoding: try JSONEncoder().encode(GeneratedNotes(text: text, evidence: [])), as: UTF8.self)
+                return (200, try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": encoded], "finish_reason": finish]]]))
+            }
+            do {
+                _ = try await generateNotes(transcription: transcript, originalNotes: "", config: config, session: transport)
+                XCTFail("Expected \(expected)")
+            } catch let error as ProviderError { XCTAssertEqual(error, expected) }
+        }
     }
     func testAlignedAudioPreservesGapAndBothSourceOffsets() throws {
         let first = try wav(name: "a.wav", value: 0.2, seconds: 0.5)
@@ -527,6 +548,7 @@ public func runTranscriptionSelftests() async -> Bool {
     contractFailures = []
     let tests = TranscriptionTests()
     let cases: [(String, () async throws -> Void)] = [
+        ("single dictation assembly request", { if !(await runDictationAssemblySelftests()) { XCTFail("Chunk assembly contract failed") } }),
         ("live meeting protocol recovery and durable coverage", { if !(await runLiveMeetingSelftests()) { XCTFail("Live meeting contracts failed") } }),
         ("formatter request and paragraphs", tests.testFormatterRequestAndFaithfulParagraphs),
         ("formatter ordered fidelity guard", tests.testFormatterRejectsWordAccentNumericAndSymbolChanges),
@@ -552,7 +574,8 @@ public func runTranscriptionSelftests() async -> Bool {
         ("capture restart preserves parts", { try tests.testRestartedCaptureRetainsEarlierParts() }),
         ("audio liveness and missing tail", { tests.testBufferLivenessIncludesSilenceAndDetectsMissingTail() }),
         ("bounded long notes", tests.testLongNotesAreBoundedAndRetainOriginalEvidence),
-        ("notes evidence validation", tests.testNotesRejectInventedEvidence),
+        ("notes evidence filtering", tests.testNotesDropInventedEvidenceButKeepNotes),
+        ("notes truncation", tests.testNotesReportTruncationAndEmptyNotes),
     ]
     for (name, body) in cases {
         let before = contractFailures.count

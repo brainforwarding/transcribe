@@ -30,7 +30,8 @@ public final class CaptureController: @unchecked Sendable {
         systemURL = outDir.appendingPathComponent("system_part_00000.wav")
         micURL = outDir.appendingPathComponent("mic_part_00000.wav")
         system = micOnly ? nil : SystemAudioCapture(outputURL: systemURL, epoch: epoch)
-        mic = MicCapture(outputURL: micURL, epoch: epoch)
+        // Mac audio playing through the speakers reaches the microphone; cancel it whenever we also record Mac audio.
+        mic = MicCapture(outputURL: micURL, epoch: epoch, echoCancellation: !micOnly)
         self.micUniqueID = micUniqueID
         mic.onLevel = { [weak self] in self?.onLevel?(.mic, $0) }
         system?.onLevel = { [weak self] in self?.onLevel?(.system, $0) }
@@ -65,20 +66,31 @@ public final class CaptureController: @unchecked Sendable {
         }
         guard mayStart else { throw CancellationError() }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONSerialization.data(withJSONObject: ["epoch": epoch])
-            .write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
+        try writeCaptureInfo()
         // The microphone starts independently; system silence or a permission failure
         // cannot prevent the user's voice from being recorded.
         async let microphone: String = Task.detached { [mic, micUniqueID] in try mic.start(uniqueID: micUniqueID) }.value
         async let macAudio: Void = startSystemIfAvailable()
         do {
             _ = try await microphone
+            try? writeCaptureInfo(microphone: mic.microphoneProcessing)
             await macAudio
             guard !isStopped else { throw CancellationError() }
         } catch {
             _ = await stop()
             throw error
         }
+    }
+    /// Diagnostics only; nothing reads this file back.
+    private func writeCaptureInfo(microphone: MicProcessing? = nil) throws {
+        var info: [String: Any] = ["epoch": epoch]
+        if let microphone {
+            info["micProcessing"] = microphone.mode.rawValue
+            if let note = microphone.note { info["micProcessingNote"] = note }
+            if microphone.mode == .voice, let output = CoreAudioDevices.defaultOutputName() { info["referenceOutput"] = output }
+        }
+        try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
+            .write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
     }
     private func startSystemIfAvailable() async {
         guard let system, !isStopped else { return }

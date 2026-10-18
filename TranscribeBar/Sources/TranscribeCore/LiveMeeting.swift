@@ -3,6 +3,7 @@ import Foundation
 public struct MeetingTurn: Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable { case pending, confirmed, needsRecovery }
     public enum Origin: String, Codable, Sendable { case live, recovered }
+    public enum EndReason: String, Codable, Sendable { case pause, forced, stopped, discontinuity }
     public var idx: Int
     public var source: Source
     public var start: Double
@@ -11,11 +12,14 @@ public struct MeetingTurn: Codable, Sendable, Equatable {
     public var origin: Origin
     public var text: String
     public var failureKind: ServiceFailureKind?
+    public var endReason: EndReason?
     public var turnID: String { "turn-\(idx)" }
     public init(idx: Int, source: Source, start: Double, end: Double, state: State = .pending,
-                origin: Origin = .live, text: String = "", failureKind: ServiceFailureKind? = nil) {
+                origin: Origin = .live, text: String = "", failureKind: ServiceFailureKind? = nil,
+                endReason: EndReason? = nil) {
         self.idx = idx; self.source = source; self.start = start; self.end = end; self.state = state
         self.origin = origin; self.text = text; self.failureKind = failureKind
+        self.endReason = endReason
     }
 }
 
@@ -99,7 +103,7 @@ extension SessionRecord {
     /// Validate an entire snapshot before atomically saving it. A completed turn
     /// can never change text, range, source, or ID, including an empty completion.
     public mutating func applyMeetingTurns(_ proposed: [MeetingTurn]) throws {
-        guard liveMeetingVersion != nil, Set(proposed.map(\.idx)).count == proposed.count,
+        guard usesLiveTranscription, Set(proposed.map(\.idx)).count == proposed.count,
               proposed.allSatisfy({ $0.start.isFinite && $0.end.isFinite && $0.start >= 0 && $0.end > $0.start
                   && $0.idx >= $0.source.rawValue * 1_000_000_000
                   && $0.idx < ($0.source.rawValue + 1) * 1_000_000_000 }) else { throw ProviderError.invalidResponse }
@@ -118,18 +122,23 @@ extension SessionRecord {
                 label: $0.source == .system ? "System audio" : (meetingMode == .inPerson ? "Microphone" : "You"),
                 text: $0.text, source: $0.source, idx: $0.idx, timing: .audioInterval) }
             .sorted { a, b in a.start != b.start ? a.start < b.start : (a.source != b.source ? a.source < b.source : a.idx < b.idx) }
-        transcript = renderConversation(segments, timestamps: true)
+        if kind == .dictation {
+            transcript = dictationBoundaryResult.flatMap { $0.turns == proposed ? $0.text : nil }
+                ?? segments.map(\.text).joined(separator: " ")
+            rawTranscript = transcript
+        } else { transcript = renderConversation(segments, timestamps: true) }
     }
 
     public var liveMeetingIssues: [TranscriptionIssue] {
         meetingTurns.filter { $0.state == .needsRecovery }.map {
             TranscriptionIssue(source: $0.source, spanID: $0.turnID,
-                userMessage: "Some meeting words are missing. The saved audio can be retried.",
+                userMessage: kind == .dictation ? "Some dictated words are missing. The saved audio can be retried."
+                    : "Some meeting words are missing. The saved audio can be retried.",
                 failureKind: $0.failureKind ?? .unavailable)
         }
     }
 
     public var hasSealedMeetingAudio: Bool {
-        liveMeetingVersion == nil || uncoveredMeetingAudio(tracks: tracks, turns: meetingTurns, includePending: false).isEmpty
+        !usesLiveTranscription || uncoveredMeetingAudio(tracks: tracks, turns: meetingTurns, includePending: false).isEmpty
     }
 }
