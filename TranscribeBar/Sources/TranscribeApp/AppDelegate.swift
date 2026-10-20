@@ -65,8 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         shortcuts.onCancel = { [weak self] in
             guard let self else { return }
-            if self.model.formattingRecordID != nil { self.model.cancelFormattingRetry() }
-            else if self.model.activeKind == .meeting { self.model.chipVisible = false }
+            if self.model.activeKind == .meeting { self.model.chipVisible = false }
             else { self.model.cancelDictation() }
         }
         shortcuts.onPasteLast = { [weak self] in self?.model.pasteLast() }
@@ -140,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             shortcuts.setPasteLastShortcut(enabled: model.pasteLastShortcutEnabled)
             pasteShortcutEnabled = model.pasteLastShortcutEnabled
         }
-        shortcuts.consumesEscape = model.formattingRecordID != nil || (model.activeKind == .dictation &&
+        shortcuts.consumesEscape = (model.activeKind == .dictation &&
             [.starting, .recording, .stopping, .transcribing].contains(model.phase))
         shortcuts.observesEscapeDuringMeeting = model.activeKind == .meeting && model.isBusy
         NSApp.appearance = model.appearance == "dark" ? NSAppearance(named: .darkAqua)

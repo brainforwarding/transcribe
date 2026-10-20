@@ -60,6 +60,9 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var keywords: [String]
     public var liveMeetingVersion: Int?
     public var liveDictationVersion: Int?
+    /// Retired local-trial preference, retained only to decode historical records.
+    public var fixGrammar: Bool?
+    public var usesContinuousDictation: Bool { kind == .dictation && liveDictationVersion == 4 }
     public var dictationPerformance: DictationPerformance?
     public var dictationBoundaryResult: DictationBoundaryResult?
     public var usesLiveTranscription: Bool { liveMeetingVersion != nil || liveDictationVersion != nil }
@@ -98,7 +101,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         case id, kind, meetingMode, title, startedAt, audioCompletedAt, duration, status, delivery, notes, preview, transcript, rawTranscript, formattingFailure, serviceProviderID,
              segments, summary, summaryStatus, summaryFailure, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
              issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords,
-             liveMeetingVersion, liveDictationVersion, dictationPerformance, dictationBoundaryResult, meetingTurns, transcriptRevision, summaryTranscriptRevision
+             liveMeetingVersion, liveDictationVersion, fixGrammar, dictationPerformance, dictationBoundaryResult, meetingTurns, transcriptRevision, summaryTranscriptRevision
     }
     public init(from decoder: Decoder) throws {
         let v = try decoder.container(keyedBy: CodingKeys.self)
@@ -110,6 +113,7 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
                   keywords: try v.decodeIfPresent([String].self, forKey: .keywords) ?? [])
         liveMeetingVersion = try v.decodeIfPresent(Int.self, forKey: .liveMeetingVersion)
         liveDictationVersion = try v.decodeIfPresent(Int.self, forKey: .liveDictationVersion)
+        fixGrammar = try v.decodeIfPresent(Bool.self, forKey: .fixGrammar)
         dictationPerformance = try v.decodeIfPresent(DictationPerformance.self, forKey: .dictationPerformance)
         dictationBoundaryResult = try v.decodeIfPresent(DictationBoundaryResult.self, forKey: .dictationBoundaryResult)
         meetingTurns = try v.decodeIfPresent([MeetingTurn].self, forKey: .meetingTurns) ?? []

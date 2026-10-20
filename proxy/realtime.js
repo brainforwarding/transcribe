@@ -10,6 +10,8 @@ const errorCodes = new Set(['invalid_api_key', 'insufficient_quota', 'credit_bal
 const errorTypes = new Set(['insufficient_quota', 'invalid_request_error', 'authentication_error',
   'permission_error', 'rate_limit_error', 'server_error', 'transcription_error']);
 const MAX_UNACKNOWLEDGED_AUDIO = 2 * 1024 * 1024;
+// Five minutes of 24 kHz mono PCM16 is 19.2 MB in base64; keep a bounded margin.
+const MAX_CONTINUOUS_AUDIO = 20 * 1024 * 1024;
 
 function safeError(error, fallback = 'transcription_unavailable') {
   return { type: errorTypes.has(error?.type) ? error.type : 'transcription_error',
@@ -43,9 +45,9 @@ export function clientFrame(raw) {
     if (s?.type !== 'transcription' || input?.format?.type !== 'audio/pcm' || input?.format?.rate !== 24000 || t?.model !== LIVE_MODEL || (input.turn_detection !== undefined && input.turn_detection !== null)) throw new Error('unsupported session');
     // Reject extra fields rather than silently accepting a voice/assistant request.
     const allowed = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).every(k => keys.includes(k));
-    if (!allowed(p, ['type','event_id','session']) || !allowed(s, ['type','audio']) || !allowed(s.audio, ['input']) || !allowed(input, ['format','transcription','turn_detection']) || !allowed(input.format, ['type','rate']) || !allowed(t, ['model','delay','languages','keywords']) || (t.delay !== undefined && t.delay !== 'low')) throw new Error('unsupported settings');
+    if (!allowed(p, ['type','event_id','session']) || !allowed(s, ['type','audio']) || !allowed(s.audio, ['input']) || !allowed(input, ['format','transcription','turn_detection']) || !allowed(input.format, ['type','rate']) || !allowed(t, ['model','delay','languages','keywords']) || (t.delay !== undefined && !['minimal', 'low'].includes(t.delay))) throw new Error('unsupported settings');
     const languages = hints(t.languages, 20, 35), keywords = hints(t.keywords, 100, 100);
-    out.session = { type: 'transcription', audio: { input: { format: { type: 'audio/pcm', rate: 24000 }, transcription: { model: LIVE_MODEL, delay: 'low', ...(languages ? { languages } : {}), ...(keywords ? { keywords } : {}) }, turn_detection: null } } };
+    out.session = { type: 'transcription', audio: { input: { format: { type: 'audio/pcm', rate: 24000 }, transcription: { model: LIVE_MODEL, delay: t.delay ?? 'low', ...(languages ? { languages } : {}), ...(keywords ? { keywords } : {}) }, turn_detection: null } } };
   } else if (p.type === 'input_audio_buffer.append') {
     if (Object.keys(p).some(k => !['type','event_id','audio'].includes(k)) || typeof p.audio !== 'string' || !p.audio.length || p.audio.length > MAX_AUDIO || p.audio.length % 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(p.audio)) throw new Error('invalid audio');
     const bytes = p.audio.length / 4 * 3 - (p.audio.endsWith('==') ? 2 : p.audio.endsWith('=') ? 1 : 0);
@@ -127,6 +129,7 @@ export async function relayTranscription(request, env) {
   const pair = new WebSocketPair(), client = pair[0], socket = pair[1], remote = upstream.webSocket;
   let closed = false, configured = false, ready = false, tokens = 262144, events = 100, last = Date.now();
   let expiry, configurationTimeout, unacknowledgedAudio = 0, currentAudio = 0;
+  let audioLimit = MAX_UNACKNOWLEDGED_AUDIO;
   const acknowledgments = [];
   const close = (code = 1000) => { if (closed) return; closed = true; clearTimeout(expiry); clearTimeout(configurationTimeout); try { socket.close(code, 'transcription session ended'); } catch {} try { remote.close(code, 'transcription session ended'); } catch {} };
   expiry = setTimeout(() => close(1000), 50 * 60 * 1000);
@@ -140,13 +143,14 @@ export async function relayTranscription(request, env) {
       if (typeof event.data !== 'string' || event.data.length > tokens || --events < 0) throw new Error('rate');
       tokens -= event.data.length;
       const p = clientFrame(event.data);
-      if (p.type === 'session.update') { if (configured) throw new Error('already configured'); configured = true; }
+      if (p.type === 'session.update') { if (configured) throw new Error('already configured'); configured = true;
+        if (p.session.audio.input.transcription.delay === 'minimal') audioLimit = MAX_CONTINUOUS_AUDIO; }
       else if (!ready) throw new Error('not configured');
       // Workers exposes no send-completion/backpressure API. Keep a bounded audio
       // window until the upstream acknowledges each ordered commit or clear.
       if (p.type === 'input_audio_buffer.append') {
         unacknowledgedAudio += p.audio.length; currentAudio += p.audio.length;
-        if (unacknowledgedAudio > MAX_UNACKNOWLEDGED_AUDIO) throw new Error('upstream stalled');
+        if (unacknowledgedAudio > audioLimit) throw new Error('upstream stalled');
       } else if (p.type === 'input_audio_buffer.commit' || p.type === 'input_audio_buffer.clear') {
         if (acknowledgments.length >= 16) throw new Error('upstream stalled');
         acknowledgments.push({ type: p.type === 'input_audio_buffer.commit' ? 'input_audio_buffer.committed' : 'input_audio_buffer.cleared', bytes: currentAudio }); currentAudio = 0;

@@ -78,27 +78,10 @@ private final class Fixture {
     let verificationSession: URLSession
     var seenProvider: ConnectionProvider?
     var seenConfig: OpenAIConfig?
-    var seenFormattingConfig: OpenAIConfig?
     let startup = Gate()
     let processing = Gate()
     let delivery = Gate()
-    let formatting = Gate()
-    let boundary = Gate()
-    var blocksBoundary = false
-    var boundaryFails = false
-    var boundarySaveFails = false
-    var boundaryRequests = 0
-    var assemblyRequests = 0
-    var boundaryText: String?
-    var formatterEnabled = false
-    var blocksFormatting = false
-    var formattingCancelled = false
-    var formatterRequests = 0
-    var rawSavedBeforeFormatting = false
-    var formattedSaveFails = false
     var cancellationSaveFails = false
-    var formattedText = "Saved speech."
-    var formatFailure: ServiceFailureKind? = nil
     var transcriptionFailure: ServiceFailureKind? = nil
     var finalText = "Saved speech"
     var finalComplete = true
@@ -186,12 +169,10 @@ private final class Fixture {
             guard let credential = credentialVault.get(provider) else { throw CheckFailure(description: "Missing synthetic credential") }
             return OpenAIConfig(baseURL: provider.baseURL, authValue: "Bearer " + credential)
         }, save: { [self] store, record in
-            if boundarySaveFails && record.dictationBoundaryResult != nil { throw CocoaError(.fileWriteOutOfSpace) }
             if liveConfirmedSaveFails && record.meetingTurns.contains(where: { $0.state == .confirmed }) { throw CocoaError(.fileWriteOutOfSpace) }
             if recordingSaveFails && record.status == .recording { throw CocoaError(.fileWriteOutOfSpace) }
             if stopSaveFails && !record.tracks.isEmpty && !record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
             if finalSaveFails && record.status == .complete && record.hasText { throw CocoaError(.fileWriteOutOfSpace) }
-            if formattedSaveFails && record.transcript == formattedText { throw CocoaError(.fileWriteOutOfSpace) }
             if cancellationSaveFails && record.status == .cancelled { throw CocoaError(.fileWriteOutOfSpace) }
             try store.save(record)
         }, cleanAudio: { [self] store, record in
@@ -210,23 +191,8 @@ private final class Fixture {
             deliveryWrites += 1; deliveredFocus = target
             return automatic ? automaticOutcome : manualOutcome
         },
-        copy: { [self] _ in copies += 1; return copyResult }, automaticTimer: false, format: { [self] raw, config in
-            guard formatterEnabled else { return DictationFormatResult(text: raw) }
-            formatterRequests += 1
-            seenFormattingConfig = config
-            let saved = try store.load().first
-            rawSavedBeforeFormatting = saved?.transcript == raw && saved?.rawTranscript == raw &&
-                seenConfig?.baseURL == config.baseURL && seenConfig?.authValue == config.authValue
-            if blocksFormatting { await formatting.wait() }
-            if formattingCancelled { throw CancellationError() }
-            return DictationFormatResult(text: formattedText, failure: formatFailure)
-        })
+        copy: { [self] _ in copies += 1; return copyResult }, automaticTimer: false)
         if liveMeetingEnabled {
-            let fixtureFormat = operations.format!
-            operations.assemble = { turns, credentials in
-                self.assemblyRequests += 1
-                return try await fixtureFormat(turns.sorted { $0.start < $1.start }.map(\.text).joined(separator: " "), credentials)
-            }
             operations.makeLiveMeeting = { [self] record, _, config, persist, draft, issue in
                 seenConfig = config
                 liveMode = record.dictationPerformance?.mode
@@ -249,7 +215,7 @@ private final class Fixture {
         model.micGranted = true; model.acceptConsent()
     }
     func close() async {
-        startup.release(); processing.release(); delivery.release(); formatting.release(); boundary.release()
+        startup.release(); processing.release(); delivery.release()
         await model?.prepareToQuit()
         model = nil; verificationSession.invalidateAndCancel()
         preferences.removePersistentDomain(forName: preferenceDomain)
@@ -269,14 +235,6 @@ private final class Fixture {
         try await until("manual paste completion") { deliveryCompletions > previous }
     }
     func audioExists() -> Bool { artifact.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
-    func addFormattingRecord(failure: ServiceFailureKind = .unavailable) throws -> UUID {
-        var record = SessionRecord(kind: .dictation, title: "Synthetic formatter retry")
-        record.status = .complete; record.delivery = .inserted
-        record.transcript = "Saved speech"; record.rawTranscript = "Saved speech"
-        record.formattingFailure = failure; record.serviceProviderID = ConnectionProvider.openAI.rawValue
-        try store.save(record); model.records = try store.load()
-        return record.id
-    }
     func addHistoricalRecord(status: SessionStatus = .complete) throws -> UUID {
         var record = SessionRecord(kind: .dictation, title: "Earlier dictation", startedAt: Date(timeIntervalSince1970: 1))
         record.status = status; record.delivery = .ready; record.transcript = status == .complete ? "Earlier text" : ""
@@ -293,193 +251,6 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
-            ("Chunked dictation uses one assembly call and no audio review", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true; f.formatterEnabled = true
-                try await f.beginRecording()
-                try await f.livePersist?([
-                    .init(idx: 0, source: .mic, start: 0, end: 1.5, state: .confirmed, text: "Saved", endReason: .forced),
-                    .init(idx: 1, source: .mic, start: 1, end: 2, state: .confirmed, text: "speech", endReason: .stopped)])
-                f.model.finishRecording()
-                try await until("single assembly delivered") { f.model.phase == .done }
-                try check(f.transcriptionRequests == 0 && f.liveRecoveries == 0 &&
-                          f.formatterRequests == 1 && f.insertions == 1 && f.model.records[0].liveDictationVersion == 3,
-                          "normal completion must perform exactly one text assembly request and no audio rechecks")
-                await f.close()
-            }),
-            ("Failed chunk assembly retains audio and never pastes provisional overlap", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true; f.formatterEnabled = true; f.formatFailure = .unavailable
-                try await f.beginRecording()
-                try await f.livePersist?([.init(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")])
-                f.model.finishRecording()
-                try await until("assembly failure saved") { f.model.phase == .done }
-                try check(f.formatterRequests == 1 && f.insertions == 0 && f.audioExists() && f.model.records[0].formattingFailure == .unavailable,
-                          "failed one-pass assembly retains the original audio and cannot insert provisional text")
-                await f.close()
-            }),
-            ("Audio retention defaults to seven days and can preserve forever", { _ in
-                let f = try Fixture()
-                f.preferences.removeObject(forKey: "audioRetentionDays")
-                let m = AppModel(store: f.store, operations: nil, preferences: f.preferences, initializeSystemState: false)
-                try check(m.audioRetentionDays == 7 && m.keepAudio, "default must retain audio even after successful dictation")
-                m.audioRetentionDays = -1
-                try check(m.keepAudio && f.preferences.integer(forKey: "audioRetentionDays") == -1, "forever preference must persist")
-                await f.close()
-            }),
-            ("Background experiment uses a persisted recording mode independently of the toggle", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true
-                try await f.beginRecording()
-                try check(f.liveMode == .background && f.model.activeRecord?.liveDictationVersion == 3,
-                          "A recording must snapshot its selected background method")
-                try await f.livePersist?([MeetingTurn(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")])
-                f.model.fasterDictation = false
-                f.model.finishRecording()
-                try await until("background recording complete") { f.model.phase == .done }
-                try check(f.transcriptionRequests == 0 && f.model.records[0].dictationPerformance?.mode == .background && f.insertions == 1,
-                          "Changing the preference cannot switch an already captured recording to a different pipeline")
-                await f.close()
-            }),
-            ("Unvalidated Team relay keeps standard dictation during the experiment", { _ in
-                let f = try Fixture(legacyCredential: .value("local-team-fixture"), storedProvider: .team, liveMeetingEnabled: true)
-                f.model.fasterDictation = true
-                try await f.beginProcessing(); f.processing.release()
-                try await until("team standard capture complete") { f.model.phase == .done }
-                try check(f.model.records[0].liveDictationVersion == nil && f.model.records[0].dictationPerformance?.mode == .standard &&
-                          f.transcriptionRequests == 1 && f.livePersist == nil,
-                          "Experimental methods cannot silently use a relay that has not passed this comparison")
-                await f.close()
-            }),
-            ("Live dictation is opt-in and switching it off restores standard capture", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                try check(!f.model.fasterDictation, "Existing users must retain standard dictation by default")
-                f.model.fasterDictation = true
-                try check(f.preferences.bool(forKey: "fasterDictation"), "Experiment choice must persist locally")
-                f.model.fasterDictation = false
-                try await f.beginProcessing(); f.processing.release()
-                try await until("standard dictation complete") { f.model.phase == .done }
-                try check(f.model.records[0].liveDictationVersion == nil && f.transcriptionRequests == 1 &&
-                          f.liveRecoveries == 0 && f.livePersist == nil,
-                          "Off must use the original transcription path without a live connection")
-                await f.close()
-            }),
-            ("Live dictation skips full ASR and shares durable formatting and final-caret delivery", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true; f.formatterEnabled = true; f.blocksFormatting = true
-                try await f.beginRecording()
-                guard let persist = f.livePersist else { throw CheckFailure(description: "Missing live dictation") }
-                let turn = MeetingTurn(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")
-                try await persist([turn])
-                try check(f.model.activeRecord?.transcript == "Saved speech" && f.model.activeRecord?.rawTranscript == "Saved speech" &&
-                          f.insertions == 0 && f.formatterRequests == 0,
-                          "Confirmed words must be plain durable dictation without insertion during capture")
-                f.model.finishRecording(); f.now += 1.2
-                try await until("live formatting") { f.formatting.entered }
-                try check(f.rawSavedBeforeFormatting && f.transcriptionRequests == 0 && f.liveRecoveries == 0,
-                          "Sealed live audio must go directly to formatting with no file transcription")
-                f.currentFocus = "Field B"; f.now += 0.3; f.formatting.release()
-                try await until("live dictation delivered") { f.model.phase == .done }
-                let saved = try f.store.load()[0]
-                try check(saved.status == .complete && saved.transcript == "Saved speech." && saved.rawTranscript == "Saved speech" &&
-                          f.insertions == 1 && f.deliveredFocus == "Field B" && saved.exportURL == nil,
-                          "Live dictation must use guarded current-caret delivery without meeting export")
-                try check(saved.dictationPerformance?.mode == .background && saved.dictationPerformance?.usedRecovery == false &&
-                          abs((saved.dictationPerformance?.stopToReady ?? 0) - 1.5) < 0.001,
-                          "Local stop-to-ready timing must include finalization and formatting")
-                await f.close()
-            }),
-            ("Failed background recognition uses whole audio and one ordinary editor", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true; f.formatterEnabled = true
-                f.finalText = "17 teachers and 70 seats"
-                f.formattedText = "17 teachers and 70 seats."
-                f.processing.release()
-                try await f.beginRecording()
-                let original = MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "First part")
-                try await f.livePersist?([original])
-                f.model.finishRecording()
-                try await until("live missing tail recovered") { f.model.phase == .done }
-                let saved = try f.store.load()[0]
-                try check(f.liveRecoveries == 0 && f.transcriptionRequests == 1 &&
-                          saved.meetingTurns == [original] && saved.status == .complete && saved.liveDictationVersion == nil,
-                          "Failed recognition must use the established whole-recording path and preserve original turns")
-                try check(saved.dictationPerformance?.usedRecovery == true && f.formatterRequests == 1 && f.assemblyRequests == 0 && f.insertions == 1
-                          && saved.rawTranscript == f.finalText && saved.transcript == f.formattedText,
-                          "Fallback uses one ordinary editor without stitching clipped recovery text")
-                await f.close()
-            }),
-            ("Live connection failure falls back to saved audio", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true
-                f.processing.release()
-                try await f.beginRecording()
-                f.liveIssue?(TranscriptionIssue(source: .mic, userMessage: "Live connection unavailable", failureKind: .unavailable))
-                try await until("live connection failure persisted") { f.model.activeRecord?.transcriptionIssues.isEmpty == false }
-                f.model.finishRecording()
-                try await until("full saved-audio recovery") { f.model.phase == .done }
-                try check(f.liveRecoveries == 0 && f.transcriptionRequests == 1 && f.model.records[0].status == .complete &&
-                          f.model.records[0].dictationPerformance?.usedRecovery == true && f.insertions == 1,
-                          "An unavailable live service must retain recording and recover all captured audio")
-                await f.close()
-            }),
-            ("Cancelled live dictation preserves audio and historical recovery never inserts", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true
-                try await f.beginRecording()
-                try await f.livePersist?([MeetingTurn(idx: 0, source: .mic, start: 0, end: 1)])
-                f.model.cancelDictation()
-                try await until("cancelled live capture") { f.model.phase == .done }
-                let id = f.model.records[0].id
-                try check(f.model.records[0].status == .cancelled && f.audioExists() && f.liveRecoveries == 0 && f.insertions == 0,
-                          "Escape must retain captured audio without recovery or insertion")
-                f.model.retry(id)
-                f.processing.release()
-                try await until("historical live recovery") { f.model.phase == .done }
-                try check(f.model.records[0].status == .complete && f.model.records[0].hasText &&
-                          f.liveRecoveries == 0 && f.transcriptionRequests == 1 && f.insertions == 0,
-                          "Explicit recovery must not insert into the current field")
-                await f.close()
-            }),
-            ("Incomplete background fallback retains audio and blocks assembly and insertion", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true; f.finalComplete = false; f.formatterEnabled = true
-                f.processing.release()
-                try await f.beginRecording()
-                f.model.finishRecording()
-                try await until("incomplete fallback") { f.model.phase == .done }
-                try check(f.model.records[0].status == .partial && f.audioExists() && f.insertions == 0
-                          && f.assemblyRequests == 0 && f.formatterRequests == 0,
-                          "Incomplete fallback must keep audio and never paste uncertain text")
-                await f.close()
-            }),
-            ("Cancellation during background fallback blocks late text and insertion", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true
-                try await f.beginRecording()
-                f.model.finishRecording()
-                try await until("fallback started") { f.processing.entered }
-                f.model.cancelDictation(); f.processing.release()
-                try await until("fallback cancelled") { f.model.phase == .done }
-                try check(f.model.records[0].status == .cancelled && f.audioExists() && f.insertions == 0
-                          && f.assemblyRequests == 0 && f.formatterRequests == 0,
-                          "Late fallback completion must not override cancellation or remove audio")
-                await f.close()
-            }),
-            ("Escape during live formatting retains original words and blocks late delivery", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.fasterDictation = true; f.formatterEnabled = true; f.blocksFormatting = true
-                try await f.beginRecording()
-                try await f.livePersist?([MeetingTurn(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Saved speech")])
-                f.model.finishRecording()
-                try await until("live formatting blocked") { f.formatting.entered }
-                f.model.cancelDictation(); f.formatting.release()
-                try await until("live formatting cancelled") { f.model.phase == .done }
-                let saved = try f.store.load()[0]
-                try check(saved.status == .cancelled && saved.transcript == "Saved speech" && f.audioExists() && f.insertions == 0 && f.cleanups == 0,
-                          "Cancelled formatting cannot overwrite durable words, delete audio or insert late")
-                await f.close()
-            }),
             ("Missing microphone remains visible without transcription or futile retry", { f in
                 f.captureHasAudio = false; f.captureStartFails = true
                 f.model.startDictation()
@@ -496,8 +267,90 @@ struct CoordinatorSelftest {
                 try check(f.model.filteredRecords.contains(where: { $0.id == record.id }) &&
                           reloaded.contains(where: { $0.id == record.id && $0.status == .failed }),
                           "Failure must remain in history and survive reload")
-                try check(f.transcriptionRequests == 0 && f.formatterRequests == 0 && f.insertions == 0 && f.cleanups == 0,
+                try check(f.transcriptionRequests == 0 && f.insertions == 0 && f.cleanups == 0,
                           "Empty capture must never call transcription, formatting, insertion or cleanup")
+            }),
+            ("Live meeting saves permanent passages and recovers only missing without legacy ASR or delivery", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("live meeting recording") { f.model.phase == .recording }
+                guard let persist = f.livePersist else { throw CheckFailure(description: "Missing live persistence hook") }
+                f.liveIssue?(TranscriptionIssue(source: .system, userMessage: "Safe fixture billing", failureKind: .billingLimit))
+                try await until("source notice received") { f.model.activeRecord?.transcriptionIssues.contains { $0.failureKind == .billingLimit } == true }
+                let turn = MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "Permanent live words")
+                try await persist([turn])
+                try check(f.model.activeRecord?.transcript.contains("Permanent live words") == true &&
+                          f.model.activeRecord?.transcriptionIssues.contains { $0.failureKind == .billingLimit } == true,
+                          "Confirmed passage is durable and another source account issue is retained")
+                try check(!f.model.canBeginUpdate, "Owned live controller blocks updater")
+                f.model.finishRecording()
+                try await until("live meeting finalized") { f.model.phase == .done }
+                let saved = try f.store.load()[0]
+                try check(saved.status == .complete && saved.meetingTurns[0] == turn && saved.meetingTurns.count == 2 &&
+                          saved.transcriptionIssues.isEmpty && f.liveRecoveries == 1 && f.recoveredInput == [turn],
+                          "Recovery appends only unfinished audio and clears remedied source notices")
+                try check(f.transcriptionRequests == 0 && f.insertions == 0 && f.manualPastes == 0,
+                          "Live meetings never use final rewrite, formatter or paste")
+                let revision = saved.transcriptRevision
+                f.model.retry(saved.id)
+                try check(f.model.activeRecord?.transcriptRevision == revision, "Completed live retry never rewrites confirmed words")
+                await f.close()
+            }),
+            ("Continuous dictation is the only mode and ignores retired preferences", { _ in
+                for provider in [ConnectionProvider.openAI, .team] {
+                    let f = try Fixture(legacyCredential: .value("local-team-fixture"), storedProvider: provider, liveMeetingEnabled: true)
+                    f.preferences.set(true, forKey: "fixGrammar")
+                    f.preferences.set(false, forKey: "fasterDictation")
+                    try await f.beginRecording()
+                    try check(f.liveMode == .live && f.model.activeRecord?.usesContinuousDictation == true,
+                              "Every connection must use continuous transcription regardless of old switches")
+                    f.liveDraft?(.init(source: .mic, itemID: "stream", text: "Ongoing words"))
+                    try await until("ongoing history preview") { f.model.dictationDisplayText(for: f.model.activeRecord!) == "Ongoing words" }
+                    try check(!f.model.records[0].hasText && f.insertions == 0, "Drafts must never be saved or pasted as confirmed text")
+                    try await f.livePersist?([.init(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Exact spoken words")])
+                    f.currentFocus = "Field B"
+                    f.model.finishRecording()
+                    try await until("continuous completion") { f.model.phase == .done }
+                    let saved = try f.store.load()[0]
+                    try check(saved.transcript == "Exact spoken words" && saved.rawTranscript == saved.transcript
+                              && f.transcriptionRequests == 0 && f.liveRecoveries == 0 && f.insertions == 1
+                              && f.insertedAfterDurableText && f.deliveredFocus == "Field B",
+                              "The authoritative live words must be delivered once, after saving, with no second recognition")
+                    await f.close()
+                }
+            }),
+            ("Continuous saved-audio recovery never inserts historical text", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                try await f.beginRecording()
+                f.model.cancelDictation()
+                try await until("continuous cancellation") { f.model.phase == .done }
+                let id = f.model.records[0].id
+                try check(f.audioExists() && f.insertions == 0 && f.transcriptionRequests == 0,
+                          "Cancellation must retain audio without starting recovery")
+                f.model.retry(id); f.processing.release()
+                try await until("continuous historical recovery") { f.model.phase == .done }
+                try check(f.model.records[0].status == .complete && f.model.records[0].transcript == f.finalText
+                          && f.transcriptionRequests == 1 && f.insertions == 0,
+                          "A historical audio replay saves exact output and never inserts automatically")
+                await f.close()
+            }),
+            ("Partial continuous recovery preserves audio and cannot insert", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.finalComplete = false; f.processing.release()
+                try await f.beginRecording(); f.model.finishRecording()
+                try await until("partial continuous completion") { f.model.phase == .done }
+                try check(f.model.records[0].status == .partial && f.audioExists() && f.insertions == 0,
+                          "Unconfirmed audio remains recoverable")
+                await f.close()
+            }),
+            ("Audio retention defaults to seven days and can preserve forever", { _ in
+                let f = try Fixture()
+                f.preferences.removeObject(forKey: "audioRetentionDays")
+                let m = AppModel(store: f.store, operations: nil, preferences: f.preferences, initializeSystemState: false)
+                try check(m.audioRetentionDays == 7 && m.keepAudio, "default must retain audio even after successful dictation")
+                m.audioRetentionDays = -1
+                try check(m.keepAudio && f.preferences.integer(forKey: "audioRetentionDays") == -1, "forever preference must persist")
+                await f.close()
             }),
             ("Microphone error during startup stops before recording", { f in
                 f.captureHasAudio = false
@@ -530,80 +383,6 @@ struct CoordinatorSelftest {
                 f.copyResult = true
                 try check(f.model.copyTranscript(textID) && f.copies == 2, "Successful clipboard write must propagate true")
             }),
-            ("Formatter failure persists separately and raw text still delivers", { f in
-                f.formatterEnabled = true; f.formattedText = "Saved speech"; f.formatFailure = .unavailable
-                try await f.beginProcessing(); f.processing.release()
-                try await until("formatter fallback delivery") { f.model.phase == .done }
-                let record = try f.store.load().first!
-                try check(record.status == .complete && record.formattingFailure == .unavailable &&
-                          record.transcript == "Saved speech" && record.rawTranscript == "Saved speech" &&
-                          record.transcriptionIssues.isEmpty && f.deliveryWrites == 1 && f.copies == 0,
-                          "Formatter failure must keep raw successful ASR and normal delivery")
-                try check(f.model.serviceNotice(for: record)?.action == .retryFormatting &&
-                          f.model.canRetryFormatting(record), "Formatting must offer a distinct text-only retry")
-            }),
-            ("Manual formatting retry preserves coordinator and insertion history", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                let id = try f.addFormattingRecord()
-                let phase = f.model.phase; let activeID = f.model.activeSessionID
-                f.model.retryFormatting(id)
-                try await until("manual formatting entry") { f.formatting.entered }
-                try check(f.model.isBusy && f.model.formattingRecordID == id && f.model.phase == phase &&
-                          f.model.activeSessionID == activeID, "Dedicated formatting must not reinterpret capture state")
-                f.model.retryFormatting(id); f.model.startDictation(); f.model.pasteLast(); f.model.setConnectionProvider(.team)
-                try check(f.formatterRequests == 1 && f.starts == 0 && f.manualPastes == 0 &&
-                          f.model.connectionProvider == .openAI, "Formatting must serialize capture, paste, provider switches and retries")
-                f.formatting.release(); try await until("manual formatting completion") { f.model.formattingRecordID == nil }
-                let saved = try f.store.load().first!
-                try check(saved.transcript == f.formattedText && saved.rawTranscript == "Saved speech" &&
-                          saved.formattingFailure == nil && saved.status == .complete && saved.delivery == .inserted &&
-                          f.model.phase == phase && f.model.activeSessionID == activeID && f.transcriptionRequests == 0 &&
-                          f.deliveryWrites == 0 && f.insertions == 0 && f.cleanups == 0 && f.copies == 0,
-                          "Manual formatting can commit only text/failure, never ASR, insertion or cleanup")
-                try check(f.seenFormattingConfig?.baseURL == ConnectionProvider.openAI.baseURL,
-                          "Manual formatter must use the selected-provider config snapshot")
-            }),
-            ("Cancelling manual formatting retains prior durable text and failure", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                let id = try f.addFormattingRecord(); f.model.retryFormatting(id)
-                try await until("cancel manual entry") { f.formatting.entered }
-                f.model.cancelFormattingRetry(); f.formatting.release()
-                try await until("cancel manual completion") { f.model.formattingRecordID == nil }
-                let record = try f.store.load().first!
-                try check(record.transcript == "Saved speech" && record.formattingFailure == .unavailable &&
-                          record.delivery == .inserted && f.deliveryWrites == 0 && f.model.phase == .idle,
-                          "Late formatter output must not overwrite a cancelled manual attempt")
-            }),
-            ("Manual formatting rejects stale text and leaves failed commits unchanged", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                let id = try f.addFormattingRecord(); f.model.retryFormatting(id)
-                try await until("stale manual entry") { f.formatting.entered }
-                var changed = f.model.records.first!; changed.transcript = "Edited text"
-                try f.store.save(changed); f.model.records[0] = changed
-                f.formatting.release(); try await until("stale manual completion") { f.model.formattingRecordID == nil }
-                let staleSaved = try f.store.load().first!
-                try check(staleSaved.transcript == "Edited text", "Stale output cannot overwrite newer text")
-                changed.transcript = "Saved speech"; try f.store.save(changed); f.model.records[0] = changed
-                f.formattedSaveFails = true; f.model.retryFormatting(id)
-                try await until("manual save failure") { f.model.formattingRecordID == nil }
-                let record = try f.store.load().first!
-                try check(record.transcript == "Saved speech" && record.formattingFailure == .unavailable &&
-                          f.deliveryWrites == 0 && f.cleanups == 0, "Failed manual commits must preserve original durable content")
-            }),
-            ("Quit cancels pending manual formatting without changing history", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                let id = try f.addFormattingRecord(); f.model.retryFormatting(id)
-                try await until("quit manual entry") { f.formatting.entered }
-                var quitStarted = false
-                let quitting = Task { @MainActor in quitStarted = true; await f.model.prepareToQuit() }
-                try await until("quit cancellation started") { quitStarted }
-                f.formatting.release(); await quitting.value
-                let record = try f.store.load().first!
-                try check(f.model.formattingRecordID == nil && !f.model.isBusy &&
-                          record.transcript == "Saved speech" && record.formattingFailure == .unavailable &&
-                          record.delivery == .inserted && f.transcriptionRequests == 0 && f.deliveryWrites == 0 && f.cleanups == 0,
-                          "Quit must clear pending formatting and preserve durable history with no other operation")
-            }),
             ("Typed empty ASR credential failures stay actionable and recover after remedy", { f in
                 f.finalText = ""; f.transcriptionFailure = .invalidCredential
                 try await f.beginProcessing(); f.processing.release()
@@ -616,143 +395,6 @@ struct CoordinatorSelftest {
                 try await until("account ASR recovery") { f.model.phase == .done && f.transcriptionRequests == 2 }
                 try check(f.model.activeRecord?.status == .complete && f.insertions == 0,
                           "Retry after remedy uses saved audio without automatic insertion")
-            }),
-            ("Account advice uses persisted provider and prefers account repair", { f in
-                let id = try f.addFormattingRecord(failure: .insufficientCredits)
-                var record = f.model.records.first!
-                f.model.setConnectionProvider(.team)
-                try check(f.model.serviceNotice(for: record)?.buttonTitle == "Add credits" &&
-                          f.model.serviceNotice(for: record)?.action == .billing,
-                          "Changing selected provider cannot redirect old OpenAI credit advice")
-                record.serviceProviderID = "team"
-                try check(f.model.serviceNotice(for: record)?.buttonTitle == "Settings" &&
-                          f.model.serviceNotice(for: record)?.action == .settings, "Team credits cannot direct users to personal billing")
-                record.serviceProviderID = nil
-                try check(f.model.serviceNotice(for: record)?.action == .settings, "Legacy unknown accounts need neutral Settings advice")
-                record.serviceProviderID = "openAI"; record.formattingFailure = .billingLimit
-                try check(f.model.serviceNotice(for: record)?.buttonTitle == "Check billing", "Limits must not falsely claim exhausted credits")
-                record.transcriptionIssues = [TranscriptionIssue(userMessage: "Unavailable", failureKind: .unavailable),
-                    TranscriptionIssue(userMessage: "Access", failureKind: .accessDenied)]
-                try check(f.model.serviceNotice(for: record)?.action == .settings, "Account setup should outrank transient retry")
-                record.transcriptionIssues = [TranscriptionIssue(userMessage: "Too large", retryable: false, failureKind: .tooLarge)]
-                try check(f.model.serviceNotice(for: record)?.action == nil,
-                          "App-controlled oversized chunks cannot offer an irrelevant Settings remedy")
-                _ = id
-            }),
-            ("Legacy raw and successful unchanged text cannot trigger formatter retry", { f in
-                f.formatterEnabled = true
-                _ = try f.addHistoricalRecord(); var record = f.model.records.first!
-                record.formattingFailure = .unavailable
-                try check(!f.model.canRetryFormatting(record), "Legacy nil raw text must never be invented")
-                record.rawTranscript = record.transcript; record.formattingFailure = nil
-                try check(!f.model.canRetryFormatting(record), "Successful unchanged text has no failed formatting to retry")
-            }),
-            ("Formatter saves raw first and accepted paragraphs before current-caret delivery", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                f.formattedText = "Saved\n\nspeech."
-                try await f.beginProcessing(); f.processing.release()
-                try await until("formatter entry") { f.formatting.entered }
-                try check(f.rawSavedBeforeFormatting && f.insertions == 0 && f.model.phase == .transcribing,
-                          "Raw text must be durable and credentials shared before formatting or insertion")
-                f.currentFocus = "Final field"; f.formatting.release()
-                try await until("formatted completion") { f.model.phase == .done }
-                let saved = try f.store.load().first
-                try check(saved?.rawTranscript == "Saved speech" && saved?.transcript == f.formattedText &&
-                          f.insertedAfterDurableText && f.deliveredFocus == "Final field",
-                          "Accepted paragraphs must be saved before completion-focus delivery")
-                var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(saved!)) as! [String: Any]
-                legacy.removeValue(forKey: "rawTranscript")
-                let decoded = try JSONDecoder().decode(SessionRecord.self, from: JSONSerialization.data(withJSONObject: legacy))
-                try check(decoded.rawTranscript == nil && decoded.transcript == f.formattedText,
-                          "Legacy records must decode without inventing a raw transcript")
-            }),
-            ("Escape during formatting retains raw without late delivery or cleanup", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                try await f.beginProcessing(); f.processing.release()
-                try await until("formatter cancellation entry") { f.formatting.entered }
-                f.model.cancelDictation(); f.formatting.release()
-                try await until("formatter cancelled completion") { f.model.phase == .done }
-                let saved = try f.store.load().first
-                try check(saved?.status == .cancelled && saved?.transcript == "Saved speech" &&
-                          saved?.rawTranscript == "Saved speech" && f.insertions == 0 && f.cleanups == 0 && f.audioExists(),
-                          "Late formatter output must not overwrite or insert a cancelled transcript")
-            }),
-            ("Formatter cancellation error after Escape reaches done", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true; f.formattingCancelled = true
-                try await f.beginProcessing(); f.processing.release()
-                try await until("formatter cancelled request") { f.formatting.entered }
-                f.model.cancelDictation(); f.formatting.release()
-                try await until("formatter cancellation error") { f.model.phase == .done }
-                try check(f.model.activeRecord?.delivery == .cancelled && f.insertions == 0 && f.cleanups == 0 &&
-                          f.model.activeRecord?.issues.isEmpty == true,
-                          "Cancellation must finish without an unavailable warning or lost raw text")
-            }),
-            ("Failed Escape persistence still shows Cancelled and blocks delivery", { f in
-                f.formatterEnabled = true; f.blocksFormatting = true
-                try await f.beginProcessing(); f.processing.release()
-                try await until("failed cancellation persistence entry") { f.formatting.entered }
-                f.cancellationSaveFails = true; f.model.cancelDictation(); f.formatting.release()
-                try await until("failed cancellation persistence completion") { f.model.phase == .done }
-                try check(f.model.chipState == .cancelled && f.insertions == 0 && f.cleanups == 0 && f.audioExists() &&
-                          f.model.activeRecord?.transcript == "Saved speech",
-                          "The in-memory cancellation latch must own feedback despite failed durable cancellation")
-            }),
-            ("Formatted save failure keeps durable raw and audio with zero insertion", { f in
-                f.formatterEnabled = true; f.formattedSaveFails = true
-                try await f.beginProcessing(); f.processing.release()
-                try await until("formatted save failure") { f.model.phase == .error }
-                let saved = try f.store.load().first
-                try check(saved?.transcript == "Saved speech" && saved?.rawTranscript == "Saved speech" &&
-                          f.model.activeRecord?.transcript == "Saved speech" && f.insertions == 0 && f.cleanups == 0 && f.audioExists(),
-                          "Unsaved formatted content must never be pasted or remove recovery audio")
-            }),
-            ("Raw save failure prevents formatter invocation", { f in
-                f.formatterEnabled = true; f.finalSaveFails = true
-                try await f.beginProcessing(); f.processing.release()
-                try await until("raw save failure") { f.model.phase == .error }
-                try check(f.formatterRequests == 0 && f.insertions == 0 && f.audioExists(),
-                          "Formatting cannot begin before raw content is durably committed")
-            }),
-            ("Partial dictation bypasses formatting", { f in
-                f.formatterEnabled = true; f.finalComplete = false
-                try await f.beginProcessing(); f.processing.release()
-                try await until("partial completion") { f.model.phase == .done }
-                try check(f.formatterRequests == 0 && f.insertions == 0 && f.model.activeRecord?.transcript == "Saved speech",
-                          "Incomplete transcripts must retain their existing behavior")
-            }),
-            ("Empty dictation bypasses formatting", { f in
-                f.formatterEnabled = true; f.finalText = " \n"
-                try await f.beginProcessing(); f.processing.release()
-                try await until("empty completion") { f.model.phase == .done }
-                try check(f.formatterRequests == 0 && f.insertions == 0 && f.model.chipState == .silent,
-                          "Empty dictation must not call the formatter")
-            }),
-            ("Meeting transcript remains unformatted and has no raw dictation field", { f in
-                f.formatterEnabled = true; f.model.meetingMode = .inPerson
-                f.model.startMeeting(); f.startup.release()
-                try await until("meeting recording") { f.model.phase == .recording }
-                f.model.finishRecording(); try await until("meeting processing") { f.processing.entered }
-                f.processing.release(); try await until("meeting completion") { f.model.phase == .done }
-                let saved = try f.store.load().first
-                try check(f.formatterRequests == 0 && f.insertions == 0 && saved?.transcript == "Saved speech" &&
-                          saved?.rawTranscript == nil && saved?.kind == .meeting,
-                          "Meetings must retain their existing transcription and export path")
-            }),
-            ("Raw formatter fallback retains normal durable insertion", { f in
-                f.formatterEnabled = true; f.formattedText = "Saved speech"
-                try await f.beginProcessing(); f.processing.release()
-                try await until("fallback completion") { f.model.phase == .done }
-                try check(f.formatterRequests == 1 && f.insertedAfterDurableText && f.deliveryWrites == 1 &&
-                          f.model.activeRecord?.transcript == "Saved speech" && f.model.statusDetail.isEmpty,
-                          "Silent fallback must deliver the already durable raw transcript normally")
-            }),
-            ("Historical retry may format but never inserts automatically", { f in
-                f.formatterEnabled = true
-                let id = try f.addHistoricalRecord(status: .failed)
-                f.model.retry(id); try await until("historical transcription") { f.processing.entered }
-                f.processing.release(); try await until("historical formatted completion") { f.model.phase == .done }
-                try check(f.formatterRequests == 1 && f.model.activeRecord?.transcript == f.formattedText && f.insertions == 0,
-                          "Formatting must preserve the historical retry insertion boundary")
             }),
             ("Provider defaults preserve legacy accounts without guessing credential contents", { f in
                 try check(f.model.connectionProvider == .openAI, "Fresh users must default to direct OpenAI")
@@ -1112,32 +754,6 @@ struct CoordinatorSelftest {
                 let after = try encoder.encode(f.store.load()[0])
                 try check(after == before,
                           "Updater latch must not cancel or mutate last completed dictation")
-            }),
-            ("Live meeting saves permanent passages and recovers only missing without legacy ASR or delivery", { _ in
-                let f = try Fixture(liveMeetingEnabled: true)
-                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
-                try await until("live meeting recording") { f.model.phase == .recording }
-                guard let persist = f.livePersist else { throw CheckFailure(description: "Missing live persistence hook") }
-                f.liveIssue?(TranscriptionIssue(source: .system, userMessage: "Safe fixture billing", failureKind: .billingLimit))
-                try await until("source notice received") { f.model.activeRecord?.transcriptionIssues.contains { $0.failureKind == .billingLimit } == true }
-                let turn = MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: "Permanent live words")
-                try await persist([turn])
-                try check(f.model.activeRecord?.transcript.contains("Permanent live words") == true &&
-                          f.model.activeRecord?.transcriptionIssues.contains { $0.failureKind == .billingLimit } == true,
-                          "Confirmed passage is durable and another source account issue is retained")
-                try check(!f.model.canBeginUpdate, "Owned live controller blocks updater")
-                f.model.finishRecording()
-                try await until("live meeting finalized") { f.model.phase == .done }
-                let saved = try f.store.load()[0]
-                try check(saved.status == .complete && saved.meetingTurns[0] == turn && saved.meetingTurns.count == 2 &&
-                          saved.transcriptionIssues.isEmpty && f.liveRecoveries == 1 && f.recoveredInput == [turn],
-                          "Recovery appends only unfinished audio and clears remedied source notices")
-                try check(f.transcriptionRequests == 0 && f.formatterRequests == 0 && f.insertions == 0 && f.manualPastes == 0,
-                          "Live meetings never use final rewrite, formatter or paste")
-                let revision = saved.transcriptRevision
-                f.model.retry(saved.id)
-                try check(f.model.activeRecord?.transcriptRevision == revision, "Completed live retry never rewrites confirmed words")
-                await f.close()
             }),
             ("Live completed transcript survives audio cleanup failure without retry", { _ in
                 let f = try Fixture(liveMeetingEnabled: true)

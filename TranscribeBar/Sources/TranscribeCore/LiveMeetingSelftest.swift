@@ -17,11 +17,13 @@ private final class LiveFixtureSocket: LiveTranscriptionSocket, @unchecked Senda
     private var output: [[String: Any]] = []
     private var closed = false
     private let blockConfiguration: Bool
-    private let blockAudio: Bool
+    private let completeAtStop: Bool
+    private var blockAudio: Bool
     private var failAudioAfter: Int?
     func setAudioFailure(after count: Int) { lock.withLock { failAudioAfter = count } }
     private var blockedSend: CheckedContinuation<Void, Error>?
-    init(blockConfiguration: Bool = false, blockAudio: Bool = false, failAudioAfter: Int? = nil) {
+    init(blockConfiguration: Bool = false, blockAudio: Bool = false, failAudioAfter: Int? = nil, completeAtStop: Bool = false) {
+        self.completeAtStop = completeAtStop
         self.blockConfiguration = blockConfiguration; self.blockAudio = blockAudio; self.failAudioAfter = failAudioAfter
     }
     var requests: [[String: Any]] { lock.withLock { output } }
@@ -31,7 +33,7 @@ private final class LiveFixtureSocket: LiveTranscriptionSocket, @unchecked Senda
         try lock.withLock { if closed { throw ProviderError.unavailable }; output.append(json) }
         if json["type"] as? String == "input_audio_buffer.append" {
             if let limit = lock.withLock({ failAudioAfter }), appends > limit { throw ProviderError.unavailable }
-            if blockAudio {
+            if lock.withLock({ blockAudio }) {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     lock.withLock {
                         if closed { continuation.resume(throwing: ProviderError.cancelled) }
@@ -39,6 +41,10 @@ private final class LiveFixtureSocket: LiveTranscriptionSocket, @unchecked Senda
                     }
                 }
             }
+        }
+        if completeAtStop && json["type"] as? String == "input_audio_buffer.commit" {
+            push(["type": "input_audio_buffer.committed", "item_id": "replayed", "previous_item_id": NSNull()])
+            push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "replayed", "transcript": "Exact replayed words"])
         }
         if json["type"] as? String == "session.update" {
             if blockConfiguration {
@@ -74,6 +80,10 @@ private final class LiveFixtureSocket: LiveTranscriptionSocket, @unchecked Senda
     func close() {
         let continuations = lock.withLock { closed = true; let result = (waiting, blockedSend); waiting = nil; blockedSend = nil; inbox = []; return result }
         continuations.0?.resume(throwing: ProviderError.cancelled); continuations.1?.resume(throwing: ProviderError.cancelled)
+    }
+    func releaseAudio() {
+        let pending = lock.withLock { blockAudio = false; let pending = blockedSend; blockedSend = nil; return pending }
+        pending?.resume()
     }
     var commits: Int { requests.filter { $0["type"] as? String == "input_audio_buffer.commit" }.count }
     var appends: Int { requests.filter { $0["type"] as? String == "input_audio_buffer.append" }.count }
@@ -157,40 +167,133 @@ private final class LiveRecoveryProtocol: URLProtocol {
 
 public func runLiveMeetingSelftests() async -> Bool {
     let cases: [(String, () async throws -> Void)] = [
-        ("pause-aware dictation waits past target and marks forced cuts", {
+        ("retained dictation replays adjacent storage files as one continuous item", {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800)!
+            buffer.frameLength = 4_800
+            for i in 0..<4_800 { buffer.floatChannelData![0][i] = 0.2 }
+            var spans: [AudioSpan] = []
+            for i in 0..<2 {
+                let url = root.appendingPathComponent("part-\(i).wav")
+                do { let file = try AVAudioFile(forWriting: url, settings: format.settings); try file.write(from: buffer) }
+                spans.append(.init(url: url, offset: Double(i) * 0.3, duration: 0.3))
+            }
+            let socket = LiveFixtureSocket(completeAtStop: true)
+            let result = try await transcribeContinuousDictation(tracks: [.init(source: .mic, spans: spans)],
+                config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
+                socketFactory: { request in
+                    guard request.url?.absoluteString == "wss://fixture.invalid/v1/realtime?intent=transcription" else { throw ProviderError.configuration }
+                    return socket
+                })
+            try liveCheck(result.complete && result.text == "Exact replayed words" && socket.commits == 1,
+                          "retry uses live model once across file rotation, with no editor or file-ASR request")
+            let uploaded = socket.requests.filter { $0["type"] as? String == "input_audio_buffer.append" }
+                .compactMap { ($0["audio"] as? String).flatMap { Data(base64Encoded: $0) } }.reduce(0) { $0 + $1.count }
+            try liveCheck(abs(uploaded - 28_800) <= 4, "all 0.6 seconds are replayed without overlap or lost samples")
+            let cancelled = LiveFixtureSocket()
+            let task = Task { try await transcribeContinuousDictation(tracks: [.init(source: .mic, spans: spans)],
+                config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
+                socketFactory: { _ in cancelled }) }
+            try await liveUntil("retry starts uploading") { cancelled.appends > 0 }
+            task.cancel()
+            do { _ = try await task.value; throw LiveCheckFailure(name: "cancelled retry returned output") }
+            catch is CancellationError {}
+            try liveCheck(cancelled.isClosed && spans.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) },
+                          "cancelled replay closes transport and preserves every saved audio part")
+        }),
+        ("continuous startup preserves the prefix through a delayed configuration", {
+            let socket = LiveFixtureSocket(blockConfiguration: true), state = LiveFixtureState()
+            let live = LiveMeetingController(realtimeURL: URL(string: "wss://fixture.invalid/v1/realtime")!,
+                config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
+                sources: [.mic], onPersist: { try state.persist($0) }, onDraft: { state.draft($0) }, socketFactory: { request in
+                    try liveCheck(request.timeoutInterval == 330, "continuous transport supports the full recording duration")
+                    return socket
+                },
+                continuousDictation: true)
+            await live.start()
+            try await liveUntil("slow configuration started") { !socket.requests.isEmpty }
+            for i in 0..<18 {
+                live.offer(liveFrame(offset: Double(i) * 0.4))
+                try await Task.sleep(nanoseconds: 2_000_000)
+            }
+            try liveCheck(!socket.isClosed && socket.commits == 0, "startup preserves more than two seconds without reconnecting")
+            socket.push(["type": "session.updated", "session": ["type": "transcription"]])
+            // This later server event is handled only after configuration has
+            // drained the complete buffered prefix, regardless of wire packet sizes.
+            socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "prefix", "delta": "Prefix drained"])
+            try await liveUntil("startup prefix drained") { state.draftText == "Prefix drained" }
+            let turns = await live.cancel()
+            try liveCheck(turns.count == 1 && turns[0].start == 0 && abs(turns[0].end - 7.2) < 0.001,
+                          "buffered prefix survives cancellation: \(turns.map { "\($0.start)-\($0.end):\($0.state.rawValue)" })")
+        }),
+        ("continuous upload jitter preserves queued speech without restarting", {
+            let socket = LiveFixtureSocket(blockAudio: true), state = LiveFixtureState()
+            let live = LiveMeetingController(realtimeURL: URL(string: "wss://fixture.invalid/v1/realtime")!,
+                config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
+                sources: [.mic], onPersist: { try state.persist($0) }, onDraft: { state.draft($0) },
+                socketFactory: { _ in socket }, continuousDictation: true)
+            await live.start(); live.offer(liveFrame(offset: 0))
+            try await liveUntil("stalled upload starts") { socket.appends > 0 }
+            for i in 1..<19 { live.offer(liveFrame(offset: Double(i) * 0.4)) }
+            socket.releaseAudio()
+            socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "stream", "delta": "Queue drained"])
+            try await liveUntil("bounded upload queue drained") { state.draftText == "Queue drained" }
+            try liveCheck(!socket.isClosed && socket.commits == 0, "brief upload stalls do not restart or cut the live stream")
+            let turns = await live.cancel()
+            try liveCheck(turns.count == 1 && turns[0].start == 0 && abs(turns[0].end - 7.6) < 0.001,
+                          "queued speech retains complete capture coverage")
+        }),
+        ("continuous dictation streams beyond old cuts and finalizes once at stop", {
+            let socket = LiveFixtureSocket(), state = LiveFixtureState()
+            let live = LiveMeetingController(realtimeURL: URL(string: "wss://fixture.invalid/v1/realtime")!,
+                config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
+                sources: [.mic], onPersist: { try state.persist($0) }, onDraft: { state.draft($0) },
+                socketFactory: { _ in socket }, continuousDictation: true)
+            await live.start()
+            for i in 0..<75 {
+                let before = socket.appends
+                live.offer(liveFrame(offset: Double(i) * 0.4, signal: i % 8 < 5))
+                try await liveUntil("continuous frame uploaded") { socket.appends > before }
+            }
+            try liveCheck(socket.commits == 0 && state.turns.isEmpty, "no timed cuts, pause cuts or overlap before stop")
+            socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "stream", "delta": "Live "])
+            try await liveUntil("live draft before any commit") { state.draftText == "Live " }
+            // More than the old early-event cap: a long stream must aggregate
+            // drafts instead of retaining every pre-commit delta event.
+            for _ in 0..<200 {
+                socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "stream", "delta": "word "])
+            }
+            let finish = Task { await live.finish() }
+            try await liveUntil("single continuous stop commit") { socket.commits == 1 }
+            socket.push(["type": "input_audio_buffer.committed", "item_id": "stream", "previous_item_id": NSNull()])
+            socket.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "stream", "transcript": "Live final words."])
+            let turns = await finish.value
+            try liveCheck(turns.count == 1 && turns[0].state == .confirmed && turns[0].start == 0
+                && abs(turns[0].end - 30) < 0.001 && turns[0].text == "Live final words." && socket.commits == 1,
+                "one final item covers exact full capture and uses completed text, without replayed drafts")
+        }),
+        ("continuous dictation supports all five minutes without an append-ID cutoff", {
             let socket = LiveFixtureSocket(), state = LiveFixtureState()
             let live = LiveMeetingController(realtimeURL: URL(string: "wss://fixture.invalid/v1/realtime")!,
                 config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
                 sources: [.mic], onPersist: { try state.persist($0) }, socketFactory: { _ in socket },
-                finishTimeout: 0.1, pauseAwareDictation: true)
+                continuousDictation: true)
             await live.start()
-            for i in 0..<50 {
-                let before = socket.appends
-                live.offer(liveFrame(offset: Double(i) * 0.4))
-                try await liveUntil("continuous frame uploaded") { socket.appends > before }
-                if i == 25 { try liveCheck(socket.commits == 0, "10 second target must not cut speech") }
+            for i in 0..<6_000 {
+                live.offer(liveFrame(offset: Double(i) * 0.05, duration: 0.05))
+                if i % 10 == 9 { try await liveUntil("five-minute frame batch uploaded") { socket.appends >= i + 1 } }
             }
-            try await liveUntil("forced 20 second boundary") { socket.commits == 1 }
-            try liveCheck(state.turns.first?.endReason == .forced && abs(state.turns[0].end - 20) < 0.001, "forced boundary saved before ACK")
-            let before = socket.appends
-            live.offer(liveFrame(offset: 20))
-            try await liveUntil("overlapping next turn uploaded") { socket.appends > before }
-            let stopped = await live.cancel()
-            try liveCheck(stopped.count == 2 && abs(stopped[1].start - 18) < 0.001 && stopped[1].end > 20,
-                          "next turn reuses exactly two seconds of actual audio without a gap")
-            let pauseSocket = LiveFixtureSocket(), pauseState = LiveFixtureState()
-            let paused = LiveMeetingController(realtimeURL: URL(string: "wss://fixture.invalid/v1/realtime")!,
-                config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"),
-                sources: [.mic], onPersist: { try pauseState.persist($0) }, socketFactory: { _ in pauseSocket }, pauseAwareDictation: true)
-            await paused.start()
-            for i in 0..<27 {
-                let before = pauseSocket.appends
-                paused.offer(liveFrame(offset: Double(i) * 0.4, signal: i < 26))
-                try await liveUntil("pause frame uploaded") { pauseSocket.appends > before }
-            }
-            try await liveUntil("short pause after target") { pauseSocket.commits == 1 }
-            try liveCheck(pauseState.turns.first?.endReason == .pause && pauseState.turns[0].end < 11, "uses short pause rather than waiting for forced ceiling")
-            _ = await paused.cancel()
+            try liveCheck(socket.commits == 0 && !socket.isClosed, "all 6000 frames stream without a forced cut or artificial event limit")
+            let finish = Task { await live.finish() }
+            try await liveUntil("five-minute final commit") { socket.commits == 1 }
+            socket.push(["type": "input_audio_buffer.committed", "item_id": "full", "previous_item_id": NSNull()])
+            socket.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "full", "transcript": "Full five-minute dictation."])
+            let turns = await finish.value
+            try liveCheck(turns.count == 1 && turns[0].state == .confirmed && turns[0].start == 0
+                          && abs(turns[0].end - 300) < 0.001, "one completed item seals the full five-minute capture")
         }),
         ("live dictation keeps plain ordered words and its experiment metadata", {
             var record = SessionRecord(kind: .dictation, title: "Dictation")
@@ -204,6 +307,11 @@ public func runLiveMeetingSelftests() async -> Bool {
             try liveCheck(restored.liveDictationVersion == 1 && restored.liveMeetingVersion == nil &&
                           restored.dictationPerformance?.mode == .live && restored.meetingTurns == record.meetingTurns,
                           "experiment mode and durable coverage must survive restart independently of the setting")
+            try liveCheck(restored.fixGrammar == nil, "old recordings decode without retired local-trial metadata")
+            record.liveDictationVersion = 4; record.fixGrammar = false
+            let continuous = try JSONDecoder().decode(SessionRecord.self, from: JSONEncoder().encode(record))
+            try liveCheck(continuous.usesContinuousDictation && continuous.fixGrammar == false,
+                          "continuous mode and no-cleanup choice survive restart together")
         }),
         ("short dictation finalization deadline preserves unconfirmed audio for recovery", {
             let socket = LiveFixtureSocket(), state = LiveFixtureState()
@@ -219,32 +327,21 @@ public func runLiveMeetingSelftests() async -> Bool {
                           "a delayed completion cannot stall dictation or discard its audio interval")
         }),
         ("canonical PCM and live configuration", {
+            let delta = try LiveTranscriptionEvent.parse(JSONSerialization.data(withJSONObject: [
+                "type": "conversation.item.input_audio_transcription.delta", "item_id": "fixture", "delta": "new words", "transcript": "full old and new words"]))
+            try liveCheck(delta.text == "new words", "delta events use incremental text rather than an optional cumulative transcript")
             let configuration = try LiveProtocol.configuration(languages: ["es", "pt"], keywords: ["Tomas"], eventID: "fixture-config")
             let json = try JSONSerialization.jsonObject(with: configuration) as! [String: Any]
             let input = ((json["session"] as! [String: Any])["audio"] as! [String: Any])["input"] as! [String: Any]
             let transcription = input["transcription"] as! [String: Any]
             try liveCheck(transcription["model"] as? String == "gpt-live-transcribe" && transcription["prompt"] == nil && input["turn_detection"] is NSNull, "fixed transcription-only config")
-            let committedData = try LiveProtocol.configuration(languages: ["es"], keywords: [], eventID: "fixture-committed", model: .committed)
-            let committedJSON = try JSONSerialization.jsonObject(with: committedData) as! [String: Any]
-            let committedInput = ((committedJSON["session"] as! [String: Any])["audio"] as! [String: Any])["input"] as! [String: Any]
-            let committedASR = committedInput["transcription"] as! [String: Any]
-            try liveCheck(committedASR["model"] as? String == "gpt-transcribe" && committedASR["delay"] == nil,
-                          "committed-turn evaluation must not send live-model-only delay settings")
-            let encoder = LivePCMEncoder(), frame = liveFrame(offset: 0, duration: 0.1)
-            let bytes = try encoder.encode(frame) + encoder.finish()
-            try liveCheck(abs(bytes.count / 2 - 2_400) <= 2 && bytes.count % 2 == 0, "24k PCM16 duration")
-            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let writer = PCMTrackWriter(directory: root, source: .mic, epoch: 100)
-            var written: [CapturedAudioFrame] = []
-            writer.onAudioFrame = { written.append($0) }
-            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1_600)!
-            buffer.frameLength = 1_600; buffer.floatChannelData![0].initialize(repeating: 0.2, count: 1_600)
-            try writer.append(buffer, pts: 100.25)
-            let spans = writer.stop()
-            try liveCheck(written.count == 1 && abs(written[0].offset - spans[0].offset) < 0.000001
-                          && abs(written[0].duration - spans[0].duration) < 0.000001, "callbacks match successfully written spans")
+            let continuousData = try LiveProtocol.configuration(languages: [], keywords: [], eventID: "continuous", minimalDelay: true)
+            let continuousJSON = try JSONSerialization.jsonObject(with: continuousData) as! [String: Any]
+            let continuousInput = ((continuousJSON["session"] as! [String: Any])["audio"] as! [String: Any])["input"] as! [String: Any]
+            let continuousASR = continuousInput["transcription"] as! [String: Any]
+            try liveCheck(continuousASR["model"] as? String == "gpt-live-transcribe" && continuousASR["delay"] as? String == "minimal"
+                          && continuousInput["turn_detection"] is NSNull, "continuous dictation requests the lowest-delay live stream")
+
         }),
         ("safe realtime account and configuration aliases", {
             for (code, expected) in [("account_deactivated", ServiceFailureKind.accessDenied), ("billing_hard_limit_reached", .billingLimit), ("invalid_config", .configuration)] {

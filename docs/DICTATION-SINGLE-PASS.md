@@ -1,5 +1,7 @@
 # Single-prompt dictation
 
+Historical experiment. Superseded by the [continuous dictation decision](DICTATION-DECISION.md) for 2.1.0.
+
 18 October 2026. Included as an optional setting in release 2.0.11,
 following the owner's local trial and approval to publish.
 

@@ -94,8 +94,6 @@ struct TranscribeInsertionDiagnostics {
            let text = String(data: data, encoding: .utf8) { print(text) }
     }
 }
-#elseif TRANSCRIBE_DICTATION_BENCHMARK
-// The isolated, compile-only entry point is in DictationBenchmark.swift.
 #else
 @main
 struct TranscribeApp: App {

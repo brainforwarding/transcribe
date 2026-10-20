@@ -1,5 +1,7 @@
 # Dictation editor measurements
 
+Historical experiment. Superseded by the [continuous dictation decision](DICTATION-DECISION.md) for 2.1.0.
+
 18 October 2026. Local measurements supporting the optional Faster dictation
 setting in release 2.0.11. Owner approved publication after trial.
 

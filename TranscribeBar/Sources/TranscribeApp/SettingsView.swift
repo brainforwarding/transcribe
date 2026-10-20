@@ -15,11 +15,6 @@ struct SettingsView: View {
                 preference("Language") {
                     Picker("Language", selection: $model.languageID) { ForEach(model.languages) { Text($0.id == "auto" ? "Automatic" : $0.name).tag($0.id) } }.labelsHidden().fixedSize(horizontal: true, vertical: false).frame(width: 190, alignment: .leading)
                 }
-                preference("Faster dictation") {
-                    Toggle("Faster dictation", isOn: $model.fasterDictation).labelsHidden()
-                        .toggleStyle(.switch).disabled(model.isBusy || model.connectionProvider != .openAI)
-                    Text("≈1.1× audio cost").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-                }
                 preference("Appearance") {
                     Picker("Appearance", selection: $model.appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }.labelsHidden().fixedSize(horizontal: true, vertical: false).frame(width: 190, alignment: .leading)
                 }

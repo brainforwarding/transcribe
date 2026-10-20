@@ -1,7 +1,7 @@
 import Foundation
 
-/// Decode evidence from the retired audio-recheck experiment. New dictation uses
-/// one chunk assembly prompt; these historical results are never recomputed.
+/// Decode evidence from the retired audio-recheck experiment. Current dictation streams
+/// continuously; these historical results are never recomputed.
 public struct DictationBoundaryResult: Codable, Sendable, Equatable {
     public let turns: [MeetingTurn]
     public let text: String

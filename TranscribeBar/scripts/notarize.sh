@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="${1:-$ROOT/build/Transcribe.app}"
+APP="${1:-$ROOT/build/.app-staging.noindex/Transcribe.app}"
 APP="$(cd "$APP" && pwd -P)"
 DMG="$(dirname "$APP")/Transcribe.dmg"
 FIXTURE=false
@@ -25,7 +25,8 @@ IDENTITY="$(sed -n 's/^Authority=//p' <<< "$SIGNATURE" | head -n 1)"
 # Explicit isolated launch validation happens separately, after notarization.
 verify_app "$APP"
 
-STAGE="$(mktemp -d "$ROOT/build/notarize.XXXXXX")"
+mkdir -p "$ROOT/build/.notarization.noindex"
+STAGE="$(mktemp -d "$ROOT/build/.notarization.noindex/notarize.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$RECEIPTS"
 

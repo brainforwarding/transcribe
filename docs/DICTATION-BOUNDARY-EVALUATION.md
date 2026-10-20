@@ -1,5 +1,7 @@
 # Dictation boundary checks
 
+Historical experiment. Superseded by the [continuous dictation decision](DICTATION-DECISION.md) for 2.1.0.
+
 **Retired after the 18 October real-voice trial.** Its audio rechecks caused 34.6 s
 of a 41.1 s completion. The app now uses overlapping chunks and one text assembly
 prompt. The measurements below document the retired experiment, not the active design.

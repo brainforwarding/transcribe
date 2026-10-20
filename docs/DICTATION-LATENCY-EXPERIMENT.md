@@ -1,5 +1,7 @@
 # Dictation speed experiment
 
+Historical experiment. Superseded by the [continuous dictation decision](DICTATION-DECISION.md) for 2.1.0.
+
 **Current design, after the 18 October owner trial:** Background is the only fast
 mode. Forced chunks carry two seconds of overlap. One final GPT-6 Luna text request
 receives the ordered chunks, timings and overlap durations and performs assembly

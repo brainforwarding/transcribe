@@ -68,12 +68,10 @@ struct DictationHistoryView: View {
 
     private func entry(_ record: SessionRecord) -> some View {
         let active = isCaptureActive(record)
-        let formatting = model.formattingRecordID == record.id
         let notice = model.serviceNotice(for: record)
-        let recoveryAction: AppModel.ServiceAction? = record.canRecover ? .retryTranscription :
-            (record.formattingFailure != nil && !(record.rawTranscript ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .retryFormatting : nil)
+        let recoveryAction: AppModel.ServiceAction? = record.canRecover ? .retryTranscription : nil
         let noticeProvidesRetry = recoveryAction != nil && notice?.action == recoveryAction
-        let text = record.hasText ? record.transcript : record.preview
+        let text = model.dictationDisplayText(for: record)
         let time = record.startedAt.formatted(date: .omitted, time: .shortened)
         return HStack(alignment: .top, spacing: 16) {
             Text(time).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
@@ -85,9 +83,9 @@ struct DictationHistoryView: View {
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(text).font(DesignSystem.font(16)).foregroundStyle(DesignSystem.body)
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                } else if !active && !formatting && notice == nil && record.canRecover {
+                } else if !active && notice == nil && record.canRecover {
                     Text("Recording available").font(DesignSystem.font(14)).foregroundStyle(DesignSystem.muted)
-                } else if !active && !formatting && notice == nil {
+                } else if !active && notice == nil {
                     Text(emptyMessage(for: record))
                         .font(DesignSystem.font(14)).foregroundStyle(DesignSystem.muted)
                     if record.captureIncomplete, let issue = record.issues.first,
@@ -95,20 +93,12 @@ struct DictationHistoryView: View {
                         Text(issue).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
                     }
                 }
-                if formatting {
-                    HStack(spacing: 12) {
-                        ProgressView().controlSize(.small).accessibilityLabel("Retrying formatting")
-                        Text("Retrying…").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-                        Button("Cancel") { model.cancelFormattingRetry() }.buttonStyle(.plain)
-                            .font(DesignSystem.font(13, weight: .semibold)).foregroundStyle(DesignSystem.link)
-                            .help("Cancel formatting retry")
-                    }
-                } else if active {
+                if active {
                     Text(activeLabel).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
                 } else if let notice {
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-                        if let action = notice.action, action != .retryFormatting || record.status == .complete {
+                        if let action = notice.action {
                             Button(notice.buttonTitle) { model.performServiceAction(action, for: record.id) }
                                 .buttonStyle(.plain).font(DesignSystem.font(13, weight: .semibold))
                                 .foregroundStyle(DesignSystem.link).fixedSize()
@@ -123,13 +113,13 @@ struct DictationHistoryView: View {
                     ConfirmedCopyButton(accessibilityLabel: "Copy dictation from \(time)") { model.copyTranscript(record.id) }.buttonStyle(.plain)
                         .font(DesignSystem.font(14, weight: .semibold)).foregroundStyle(DesignSystem.link)
                 }
-                if let recoveryAction, !active, !formatting, !noticeProvidesRetry {
+                if let recoveryAction, !active, !noticeProvidesRetry {
                     Button(record.status == .cancelled ? "Recover" : "Retry") {
                         model.performServiceAction(recoveryAction, for: record.id)
                     }.buttonStyle(.plain).font(DesignSystem.font(14, weight: .semibold))
                         .foregroundStyle(DesignSystem.link)
-                        .disabled(recoveryAction == .retryFormatting ? !model.canRetryFormatting(record) : !model.canChangeConnectionProvider)
-                        .help(recoveryAction == .retryFormatting ? "Retry formatting saved text" : "Retry saved recording")
+                        .disabled(!model.canChangeConnectionProvider)
+                        .help("Retry saved recording")
                 }
             }
         }.padding(.vertical, 16).accessibilityElement(children: .contain)

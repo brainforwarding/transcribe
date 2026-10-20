@@ -54,7 +54,7 @@ replaced without the owner's explicit authorization.
   Native dictation uses Luna with `reasoning_effort: none` for its punctuation and
   paragraph pass. Meeting summaries retain their existing models.
 - Per-person hourly rate limit (`RATE_PER_HOUR`, default 120) keyed by the token owner. Each live source connection counts toward this best-effort KV limit.
-- Live sessions accept only 24 kHz PCM and `gpt-live-transcribe` transcription settings, audio appends, commits and clears. Assistant responses and tools are rejected. Connection lifetime, frame size/rate and unacknowledged audio are bounded. Unknown errors are sanitized; known account errors retain safe codes for user remedies.
+- Live sessions accept only 24 kHz PCM and `gpt-live-transcribe` transcription settings, audio appends, commits and clears. Assistant responses and tools are rejected. Connection lifetime, frame size/rate and unacknowledged audio are bounded. `delay: minimal` supports the single-item five-minute dictation stream with a 20 MiB base64 audio cap; existing `low` meeting sessions keep their 2 MiB cap. Both modes retain ordered commit/clear acknowledgment checks. Unknown errors are sanitized; known account errors retain safe codes for user remedies.
 - Constant-time token comparison; audio bodies are streamed, never read or logged; errors
   are sanitized — neither the key nor tokens are ever echoed.
 

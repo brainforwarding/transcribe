@@ -67,7 +67,7 @@ final class AppModel: ObservableObject {
     enum Sidebar: String, CaseIterable { case dictation, meetings, dictionary, settings }
     enum ChipState: Equatable { case hidden, starting, recording, warning, transcribing, inserted, ready, cancelled, failed, silent }
     enum KeyStatus: Equatable { case idle, checking, verified, rejected, savedUnverified }
-    enum ServiceAction: Equatable { case settings, billing, retryTranscription, retryFormatting }
+    enum ServiceAction: Equatable { case settings, billing, retryTranscription }
     struct ServiceNotice { let message: String; let buttonTitle: String; let action: ServiceAction? }
 
     /// The coordinator owns state; these operations isolate hardware, network and side effects.
@@ -98,14 +98,12 @@ final class AppModel: ObservableObject {
         var deliverAtCurrentCaret: (String, @escaping @MainActor () -> Bool) async -> PasteService.Outcome
         var copy: (String) -> Bool
         var automaticTimer = true
-        var format: ((String, OpenAIConfig) async throws -> DictationFormatResult)? = nil
         var makeLiveMeeting: ((SessionRecord, URL, OpenAIConfig,
             @escaping LiveMeetingController.Persist,
             @escaping @Sendable (LiveMeetingDraft) -> Void,
             @escaping @Sendable (TranscriptionIssue) -> Void) -> MeetingSession)? = nil
         var recoverMeeting: ((SessionRecord, URL, OpenAIConfig,
             @escaping LiveMeetingController.Persist) async throws -> [MeetingTurn])? = nil
-        var assemble: (([MeetingTurn], OpenAIConfig) async throws -> DictationFormatResult)? = nil
 
         @MainActor static func live() -> Operations {
             let paste = PasteService()
@@ -117,8 +115,11 @@ final class AppModel: ObservableObject {
                     return CaptureSession.Output(tracks: output.tracks, issues: output.issues)
                 }, retrySystemAudio: { try await capture.retrySystemAudio() }, setAudioFrameHandler: { capture.onAudioFrame = $0 })
             }, transcribe: { record, directory, credentials in
-                let kind: TranscriptionKind = record.kind == .dictation ? .dictation
-                    : record.meetingMode == .online ? .onlineMeeting : .inPersonMeeting
+                if record.kind == .dictation {
+                    return try await transcribeContinuousDictation(tracks: record.tracks,
+                        languages: record.language.map { [$0] } ?? [], keywords: record.keywords, config: credentials)
+                }
+                let kind: TranscriptionKind = record.meetingMode == .online ? .onlineMeeting : .inPersonMeeting
                 return try await transcribeFinal(tracks: record.tracks, kind: kind, chunkDir: directory,
                     languages: record.language.map { [$0] } ?? [], keywords: record.keywords, config: credentials)
             }, uptime: { ProcessInfo.processInfo.systemUptime }, credentials: { provider in
@@ -130,24 +131,19 @@ final class AppModel: ObservableObject {
             }, save: { try $0.save($1) }, cleanAudio: { try $0.cleanAudio(for: $1) },
             deliverAtCurrentCaret: { text, canDeliver in
                 await paste.deliverAtCurrentCaret(text, canDeliver: canDeliver)
-            }, copy: { paste.copy($0) }, format: { raw, credentials in
-                try await formatDictation(raw, config: credentials)
-            }, makeLiveMeeting: { record, url, credentials, persist, draft, issue in
+            }, copy: { paste.copy($0) }, makeLiveMeeting: { record, url, credentials, persist, draft, issue in
                 let live = LiveMeetingController(realtimeURL: url, config: credentials,
                     sources: record.kind == .dictation || record.meetingMode == .inPerson ? [.mic] : [.mic, .system],
                     languages: record.language.map { [$0] } ?? [], keywords: record.keywords,
                     onPersist: persist, onDraft: draft, onIssue: issue,
-                    finishTimeout: record.kind == .dictation ? 2 : 10,
-                    model: record.kind == .dictation ? .committed : .live,
-                    pauseAwareDictation: record.kind == .dictation)
+                    finishTimeout: 10,
+                    continuousDictation: record.usesContinuousDictation)
                 return MeetingSession(start: { await live.start() }, offer: { live.offer($0) },
                     finish: { await live.finish() }, cancel: { await live.cancel() })
             }, recoverMeeting: { record, directory, credentials, persist in
                 try await recoverMeetingTurns(tracks: record.tracks, turns: record.meetingTurns, directory: directory,
                     languages: record.language.map { [$0] } ?? [], keywords: record.keywords,
                     config: credentials, onPersist: persist)
-            }, assemble: { turns, credentials in
-                try await assembleDictation(turns, config: credentials)
             })
         }
     }
@@ -182,7 +178,6 @@ final class AppModel: ObservableObject {
     @Published var deliveryDetail = ""
     @Published var chipState: ChipState = .hidden
     @Published var chipVisible = false
-    @Published private(set) var formattingRecordID: UUID?
     @Published private(set) var meetingDrafts: [String: LiveMeetingDraft] = [:]
     @Published var shortcutAvailable = false
     @Published var lastTranscript: URL?
@@ -204,7 +199,6 @@ final class AppModel: ObservableObject {
     @Published var audioRetentionDays: Int {
         didSet { preferences.set(audioRetentionDays, forKey: "audioRetentionDays"); keepAudio = audioRetentionDays != 0 }
     }
-    @Published var fasterDictation: Bool { didSet { preferences.set(fasterDictation, forKey: "fasterDictation") } }
 
     @Published var includeSummary: Bool { didSet { preferences.set(includeSummary, forKey: "includeSummary") } }
     @Published var languageID: String { didSet { preferences.set(languageID, forKey: "languageID") } }
@@ -233,14 +227,12 @@ final class AppModel: ObservableObject {
     private var startupTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private var processingTask: Task<Void, Never>?
-    private var formattingTask: Task<Void, Never>?
     private var liveController: MeetingSession?
     private var liveStartupTask: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var liveGeneration = UUID()
     private var liveCredentials: OpenAIConfig?
     private var stoppingForQuit = false
-    private var formattingGeneration = UUID()
     private var previewTask: Task<Void, Never>?
     private var pendingPreview: PreviewWindow?
     private var previewDisabled = false
@@ -251,11 +243,20 @@ final class AppModel: ObservableObject {
     private var dismissTask: Task<Void, Never>?
     var selectedRecord: SessionRecord? { records.first { $0.id == selectedRecordID } }
     var activeRecord: SessionRecord? { records.first { $0.id == activeSessionID } }
+    func dictationDisplayText(for record: SessionRecord) -> String {
+        guard record.id == activeSessionID, record.usesContinuousDictation,
+              [.starting, .recording, .stopping, .transcribing].contains(phase) else {
+            return record.hasText ? record.transcript : record.preview
+        }
+        let draft = meetingDrafts.values.filter { $0.source == .mic }
+            .sorted { $0.itemID < $1.itemID }.map(\.text).joined(separator: " ")
+        return [record.transcript, draft].filter { !$0.isEmpty }.joined(separator: " ")
+    }
     var lastRecordWithText: SessionRecord? { records.first { $0.kind == .dictation && $0.hasText } }
-    var isBusy: Bool { updateInProgress || formattingRecordID != nil || liveController != nil || liveTask != nil || liveStartupTask != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) }
+    var isBusy: Bool { updateInProgress || liveController != nil || liveTask != nil || liveStartupTask != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) }
     /// All work that must finish naturally before an update can acquire the main-actor latch.
     var updateBlockingWork: Bool {
-        formattingRecordID != nil || [.starting, .recording, .stopping, .transcribing].contains(phase) ||
+        [.starting, .recording, .stopping, .transcribing].contains(phase) ||
             importInProgress || summaryTaskCount > 0 || manualPasteTask != nil ||
             keyStatus == .checking || pendingDialogCount > 0 || liveController != nil || liveTask != nil || liveStartupTask != nil
     }
@@ -353,7 +354,6 @@ final class AppModel: ObservableObject {
         saveFolder = URL(fileURLWithPath: p.string(forKey: "saveFolderPath") ?? docs.appendingPathComponent("Transcribe").path)
         let retention = p.object(forKey: "audioRetentionDays") as? Int ?? (p.bool(forKey: "keepAudio") ? -1 : 7)
         audioRetentionDays = retention; keepAudio = retention != 0
-        fasterDictation = p.bool(forKey: "fasterDictation")
         includeSummary = p.object(forKey: "includeSummary") == nil ? true : p.bool(forKey: "includeSummary")
         languageID = p.string(forKey: "languageID") ?? "auto"
         appearance = p.string(forKey: "appearance") ?? "system"
@@ -518,9 +518,8 @@ final class AppModel: ObservableObject {
         var newRecord = SessionRecord(kind: kind, meetingMode: meetingMode, title: title.isEmpty ? "Meeting" : title, language: languages.first { $0.id == languageID }?.code, keywords: dictionaryWords)
         if kind == .meeting, operations.makeLiveMeeting != nil { newRecord.liveMeetingVersion = 1; newRecord.serviceProviderID = connectionProvider.rawValue }
         if kind == .dictation {
-            if fasterDictation, connectionProvider == .openAI, operations.makeLiveMeeting != nil { newRecord.liveDictationVersion = 3 }
-            newRecord.dictationPerformance = .init(mode: newRecord.liveDictationVersion == nil ? .standard
-                : .background)
+            if operations.makeLiveMeeting != nil { newRecord.liveDictationVersion = 4 }
+            newRecord.dictationPerformance = .init(mode: .live)
             newRecord.serviceProviderID = connectionProvider.rawValue
         }
         let r = newRecord
@@ -640,7 +639,6 @@ final class AppModel: ObservableObject {
         }
     }
     func cancelDictation() {
-        if formattingRecordID != nil { cancelFormattingRetry(); return }
         guard activeKind == .dictation, let id = activeSessionID,
               [.starting, .recording, .stopping, .transcribing].contains(phase)
         else { if activeKind == .meeting { chipVisible = false }; return }
@@ -815,8 +813,7 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    /// Recognize during capture, then assemble once. Failed recognition falls
-    /// back to the existing whole-recording path to avoid clipped recovery edges.
+    /// Complete the live transcript. Recovery replays saved audio through the same model.
     private func processLiveDictation(id: UUID, drain: Bool) {
         guard !updateInProgress, liveTask == nil, let store,
               records.first(where: { $0.id == id })?.liveDictationVersion != nil else { return }
@@ -853,8 +850,7 @@ final class AppModel: ObservableObject {
                     guard self.liveGeneration == generation, self.activeSessionID == id,
                           !self.cancelledIDs.contains(id), self.activeRecord?.delivery != .cancelled else { throw CancellationError() }
                     guard self.mutate(id, {
-                        // Keep the original turns for diagnosis. The durable full
-                        // transcript now follows ordinary dictation formatting.
+                        // Preserve original turns for diagnosis; recovery is one full live replay.
                         $0.liveDictationVersion = nil
                         $0.transcript = result.text; $0.rawTranscript = result.text; $0.segments = result.segments
                         $0.status = result.complete && !$0.captureIncomplete ? .complete : .partial
@@ -867,7 +863,6 @@ final class AppModel: ObservableObject {
                       !self.cancelledIDs.contains(id), self.activeRecord?.delivery != .cancelled else { throw CancellationError() }
                 guard self.mutate(id, {
                     if $0.liveDictationVersion != nil {
-                        $0.liveDictationVersion = 3
                         $0.status = $0.hasSealedMeetingAudio && !$0.captureIncomplete ? .complete : .partial
                         $0.transcriptionIssues = $0.liveMeetingIssues
                     }
@@ -876,7 +871,7 @@ final class AppModel: ObservableObject {
                     if $0.delivery == .eligible { $0.delivery = .ready }
                     if let elapsed = self.timeSinceDictationStop { $0.dictationPerformance?.stopToTranscript = elapsed }
                 }) else { throw ProviderError.cacheWrite }
-                guard try await self.finishDictation(id: id, credentials: credentials) else { return }
+                guard try await self.finishDictation(id: id) else { return }
                 self.automaticDeliveryID = nil
                 if !self.keepAudio, !self.cancelledIDs.contains(id), let final = self.records.first(where: { $0.id == id }) {
                     do { try self.operations.cleanAudio(store, final) }
@@ -926,7 +921,7 @@ final class AppModel: ObservableObject {
                 }) else { self.phase = .error; self.setChip(.failed); return }
                 let current = self.records.first { $0.id == id }!
                 if current.kind == .dictation {
-                    guard try await self.finishDictation(id: id, credentials: credentials) else { return }
+                    guard try await self.finishDictation(id: id) else { return }
                 } else {
                     self.export(id); self.chipVisible = false
                     if self.includeSummary && current.hasText { await self.generateNotes(for: id, credentials: credentials) }
@@ -951,25 +946,8 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    /// Both dictation modes use the same durable formatting and guarded delivery.
-    private func finishDictation(id: UUID, credentials: OpenAIConfig) async throws -> Bool {
-        if let raw = records.first(where: { $0.id == id }), raw.status == .complete,
-           raw.hasText, raw.delivery != .cancelled, !cancelledIDs.contains(id),
-           !Task.isCancelled, let format = operations.format {
-            let started = operations.uptime()
-            let formatted: DictationFormatResult
-            if (raw.liveDictationVersion ?? 0) >= 3, let assemble = operations.assemble {
-                formatted = try await assemble(raw.meetingTurns, credentials)
-            } else { formatted = try await format(raw.transcript, credentials) }
-            guard activeSessionID == id else { return false }
-            if !Task.isCancelled, !cancelledIDs.contains(id), activeRecord?.delivery != .cancelled,
-               formatted.text != raw.transcript || formatted.failure != raw.formattingFailure || raw.dictationPerformance != nil {
-                guard mutate(id, {
-                    $0.transcript = formatted.text; $0.formattingFailure = formatted.failure
-                    $0.dictationPerformance?.formatting = max(0, self.operations.uptime() - started)
-                }) else { phase = .error; setChip(.failed); return false }
-            }
-        }
+    /// Deliver only the durable completed transcript. No post-processing request.
+    private func finishDictation(id: UUID) async throws -> Bool {
         guard let current = records.first(where: { $0.id == id }) else { return false }
         if cancelledIDs.contains(id) || current.delivery == .cancelled { setChip(.cancelled, dismissAfter: 12) }
         else if !current.hasText { setChip(current.status == .complete ? .silent : .failed, dismissAfter: 8) }
@@ -978,9 +956,6 @@ final class AppModel: ObservableObject {
                 guard mutate(id, { $0.dictationPerformance?.stopToReady = stopToReady }) else {
                     phase = .error; setChip(.failed); return false
                 }
-            }
-            if (current.liveDictationVersion ?? 0) >= 3, current.formattingFailure != nil {
-                setChip(.ready, dismissAfter: 12); return true
             }
             if canAutomaticallyDeliver(id: id, text: current.transcript) {
                 let outcome = await operations.deliverAtCurrentCaret(current.transcript, { [weak self] in
@@ -1039,47 +1014,6 @@ final class AppModel: ObservableObject {
     }
     func recover(_ id: UUID) { retry(id) }
     func recoverCancelled() { if let id = activeSessionID { retry(id) } }
-    func canRetryFormatting(_ record: SessionRecord) -> Bool {
-        !isBusy && manualPasteTask == nil && keyStatus != .checking && record.kind == .dictation &&
-            record.status == .complete && record.formattingFailure != nil &&
-            !(record.rawTranscript ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && operations.format != nil
-    }
-    /// A historical text-only retry. It never touches capture, ASR, insertion or audio cleanup.
-    func retryFormatting(_ id: UUID) {
-        guard let record = records.first(where: { $0.id == id }), canRetryFormatting(record),
-              let raw = record.rawTranscript, let format = operations.format else { return }
-        let provider = connectionProvider
-        let generation = UUID(); formattingGeneration = generation; formattingRecordID = id
-        formattingTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                if self.formattingGeneration == generation { self.formattingRecordID = nil; self.formattingTask = nil }
-            }
-            do {
-                let credentials = try self.config(for: provider)
-                let result: DictationFormatResult
-                if (record.liveDictationVersion ?? 0) >= 3, let assemble = self.operations.assemble {
-                    result = try await assemble(record.meetingTurns, credentials)
-                } else { result = try await format(raw, credentials) }
-                guard !Task.isCancelled, self.formattingGeneration == generation, self.formattingRecordID == id,
-                      let current = self.records.first(where: { $0.id == id }),
-                      current.rawTranscript == record.rawTranscript, current.transcript == record.transcript,
-                      current.status == record.status else { return }
-                _ = self.mutate(id) {
-                    $0.transcript = result.text; $0.formattingFailure = result.failure; $0.serviceProviderID = provider.rawValue
-                }
-            } catch {
-                guard !Task.isCancelled, !(error is CancellationError), self.formattingGeneration == generation,
-                      self.formattingRecordID == id, let current = self.records.first(where: { $0.id == id }),
-                      current.rawTranscript == record.rawTranscript, current.transcript == record.transcript else { return }
-                _ = self.mutate(id) {
-                    $0.formattingFailure = self.failureKind(for: error)
-                    $0.serviceProviderID = provider.rawValue
-                }
-            }
-        }
-    }
-    func cancelFormattingRetry() { formattingTask?.cancel() }
     /// One line for the summary panel after a failed notes generation.
     func notesFailureMessage(_ failure: ServiceFailureKind?) -> String {
         switch failure {
@@ -1095,30 +1029,28 @@ final class AppModel: ObservableObject {
     func serviceNotice(for record: SessionRecord) -> ServiceNotice? {
         let failures = record.transcriptionIssues.compactMap(\.failureKind)
         let asrFailure = failures.first { $0.allowsRecoveryAfterRemedy || $0 == .invalidHints } ?? failures.first
-        guard let failure = asrFailure ?? record.formattingFailure else { return nil }
-        let formatting = asrFailure == nil
-        let prefix = formatting ? "Text saved. " : ""
+        guard let failure = asrFailure else { return nil }
         let provider = record.serviceProviderID.flatMap(ConnectionProvider.init(rawValue:))
-        let retryAction: ServiceAction = formatting ? .retryFormatting : .retryTranscription
+        let retryAction: ServiceAction = .retryTranscription
         let retryTitle = "Retry"
         switch failure {
         case .credentialMissing:
-            return ServiceNotice(message: prefix + "Add your " + (provider == .openAI ? "OpenAI API key" : provider == .team ? "team token" : "credential") + " in Settings.", buttonTitle: "Settings", action: .settings)
+            return ServiceNotice(message: "Add your " + (provider == .openAI ? "OpenAI API key" : provider == .team ? "team token" : "credential") + " in Settings.", buttonTitle: "Settings", action: .settings)
         case .credentialLocked:
-            return ServiceNotice(message: prefix + "Unlock your " + (provider == .openAI ? "OpenAI API key" : provider == .team ? "team token" : "credential") + " in Settings.", buttonTitle: "Unlock", action: .settings)
+            return ServiceNotice(message: "Unlock your " + (provider == .openAI ? "OpenAI API key" : provider == .team ? "team token" : "credential") + " in Settings.", buttonTitle: "Unlock", action: .settings)
         case .configuration:
-            return ServiceNotice(message: prefix + "The transcription service could not accept this request.", buttonTitle: "Settings", action: .settings)
+            return ServiceNotice(message: "The transcription service could not accept this request.", buttonTitle: "Settings", action: .settings)
         case .invalidCredential:
-            return ServiceNotice(message: prefix + (provider == .team ? "Your team token was rejected." : provider == .openAI ? "Your API key was rejected." : "Your credential was rejected."), buttonTitle: "Check Settings", action: .settings)
+            return ServiceNotice(message: (provider == .team ? "Your team token was rejected." : provider == .openAI ? "Your API key was rejected." : "Your credential was rejected."), buttonTitle: "Check Settings", action: .settings)
         case .accessDenied:
-            return ServiceNotice(message: prefix + "Your account cannot access this service.", buttonTitle: "Check access", action: .settings)
+            return ServiceNotice(message: "Your account cannot access this service.", buttonTitle: "Check access", action: .settings)
         case .insufficientCredits, .billingLimit:
             if provider == .openAI {
-                return ServiceNotice(message: prefix + (failure == .insufficientCredits ? "Your API credits are exhausted." : "An account or project limit was reached."), buttonTitle: failure == .insufficientCredits ? "Add credits" : "Check billing", action: .billing)
+                return ServiceNotice(message: (failure == .insufficientCredits ? "Your API credits are exhausted." : "An account or project limit was reached."), buttonTitle: failure == .insufficientCredits ? "Add credits" : "Check billing", action: .billing)
             }
-            return ServiceNotice(message: prefix + (provider == .team ? "Your team service needs billing attention. Contact your administrator." : "The service account needs billing attention."), buttonTitle: "Settings", action: .settings)
+            return ServiceNotice(message: (provider == .team ? "Your team service needs billing attention. Contact your administrator." : "The service account needs billing attention."), buttonTitle: "Settings", action: .settings)
         case .rateLimited:
-            return ServiceNotice(message: prefix + "Too many requests. Try again shortly.", buttonTitle: "Retry", action: retryAction)
+            return ServiceNotice(message: "Too many requests. Try again shortly.", buttonTitle: "Retry", action: retryAction)
         case .invalidHints:
             return ServiceNotice(message: record.usesLiveTranscription
                 ? "The transcription service could not accept this request."
@@ -1126,14 +1058,13 @@ final class AppModel: ObservableObject {
         case .tooLarge:
             return ServiceNotice(message: "This recording could not be uploaded. Your audio is saved.", buttonTitle: "", action: nil)
         case .unavailable, .invalidResponse, .storage, .timedOut, .truncated:
-            return ServiceNotice(message: formatting ? "Text saved. Formatting could not finish." : "Transcription could not finish. Your recording is saved.", buttonTitle: retryTitle, action: retryAction)
+            return ServiceNotice(message: "Transcription could not finish. Your recording is saved.", buttonTitle: retryTitle, action: retryAction)
         }
     }
     func performServiceAction(_ action: ServiceAction, for id: UUID) {
         guard !isBusy, manualPasteTask == nil, keyStatus != .checking, let record = records.first(where: { $0.id == id }) else { return }
         switch action {
         case .retryTranscription: retry(id)
-        case .retryFormatting: retryFormatting(id)
         case .settings:
             if let provider = record.serviceProviderID.flatMap(ConnectionProvider.init(rawValue:)) { setConnectionProvider(provider) }
             showSettings?()
@@ -1258,8 +1189,7 @@ final class AppModel: ObservableObject {
     @discardableResult private func mutate(_ id: UUID, _ change: (inout SessionRecord) -> Void) -> Bool {
         guard let index = records.firstIndex(where: { $0.id == id }), let store else { return false }
         var next = records[index]; change(&next)
-        if next.status == .complete, next.hasText, next.formattingFailure == nil,
-           next.audioCompletedAt == nil || records[index].formattingFailure != nil { next.audioCompletedAt = Date() }
+        if next.status == .complete, next.hasText, next.audioCompletedAt == nil { next.audioCompletedAt = Date() }
         do { try operations.save(store, next); records[index] = next; return true } catch { statusDetail = "Changes could not be saved"; return false }
     }
     private func setChip(_ state: ChipState, dismissAfter seconds: Double? = nil) {
@@ -1274,7 +1204,6 @@ final class AppModel: ObservableObject {
         let summaries = Array(summaryTasks.values)
         for task in summaries { task.cancel() }
         for task in summaries { await task.value }
-        formattingTask?.cancel(); await formattingTask?.value
         if activeKind == .dictation, [.starting, .recording, .stopping, .transcribing].contains(phase) { cancelDictation() }
         if phase == .starting || phase == .recording { finishRecording() }
         await stopTask?.value; previewTask?.cancel(); processingTask?.cancel()

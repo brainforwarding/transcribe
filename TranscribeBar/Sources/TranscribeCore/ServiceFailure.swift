@@ -14,12 +14,6 @@ public enum ServiceFailureKind: String, Codable, Sendable, Equatable {
     }
 }
 
-public struct DictationFormatResult: Sendable, Equatable {
-    public let text: String
-    public let failure: ServiceFailureKind?
-    public init(text: String, failure: ServiceFailureKind? = nil) { self.text = text; self.failure = failure }
-}
-
 extension ProviderError {
     public var failureKind: ServiceFailureKind? {
         switch self {

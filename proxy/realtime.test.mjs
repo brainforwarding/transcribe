@@ -104,4 +104,27 @@ await fixture(async f=>{f.fetchResult=new RealResponse(JSON.stringify({error:{co
 await fixture(async f=>{f.fetchResult=new RealResponse(JSON.stringify({error:{code:'unknown',type:'insufficient_quota'}}),{status:429});const r=await worker.fetch(f.request(),f.env);assert.deepEqual((await r.json()).error,{code:'transcription_unavailable',type:'insufficient_quota'});});
 await fixture(async f=>{f.env.RATE={get:async()=> '120',put:async()=>assert.fail('must not write when limited')};const r=await worker.fetch(f.request(),f.env);assert.equal(r.status,429);assert.equal(f.calls.length,0);});
 await fixture(async f=>{f.fetchResult=new RealResponse('{"ok":true}',{headers:{'Content-Type':'application/json'}});const r=await worker.fetch(new Request('https://fixture.invalid/v1/chat/completions',{method:'POST',headers:{Authorization:'Bearer fixture-team-token','Content-Type':'application/json','X-Fixture-Private':'not-forwarded'},body:JSON.stringify({model:'gpt-6-luna',messages:[]})}),f.env);assert.equal(r.status,200);assert.equal(f.calls[0].url,'https://api.openai.com/v1/chat/completions');assert.equal(f.calls[0].options.headers.get('Authorization'),'Bearer fixture-upstream-key');assert.equal(f.calls[0].options.headers.get('X-Fixture-Private'),null);});
+// A single continuous item spans all 300 seconds, with one commit at stop.
+await fixture(async f=>{
+  await relayTranscription(f.request(),f.env);
+  const continuous=structuredClone(session);continuous.session.audio.input.transcription.delay='minimal';
+  f.socket.message(continuous);f.remote.message({type:'session.updated',session:{type:'transcription'}});
+  assert.equal(f.remote.sent[0].session.audio.input.transcription.delay,'minimal');
+  const audio=Buffer.alloc(48000).toString('base64');
+  for(let i=0;i<300;i++){f.advance(1000);f.socket.message({type:'input_audio_buffer.append',audio});}
+  assert.equal(f.socket.closes.length,0);assert.equal(f.remote.sent.length,301);
+  f.socket.message({type:'input_audio_buffer.commit',event_id:'stop'});
+  f.remote.message({type:'input_audio_buffer.committed',item_id:'full',previous_item_id:null});
+  f.remote.message({type:'conversation.item.input_audio_transcription.completed',item_id:'full',transcript:'Full recording'});
+  assert.equal(f.socket.sent.at(-1).transcript,'Full recording');assert.equal(f.socket.closes.length,0);
+});
+// The larger continuous window is still bounded when no ACK ever arrives.
+await fixture(async f=>{
+  await relayTranscription(f.request(),f.env);
+  const continuous=structuredClone(session);continuous.session.audio.input.transcription.delay='minimal';
+  f.socket.message(continuous);f.remote.message({type:'session.updated',session:{type:'transcription'}});
+  const audio=Buffer.alloc(48000).toString('base64');
+  for(let i=0;i<328;i++){f.advance(1000);f.socket.message({type:'input_audio_buffer.append',audio});}
+  assert.equal(f.socket.closes[0].code,1008);
+});
 console.log(`${n} offline transcription relay checks passed`);

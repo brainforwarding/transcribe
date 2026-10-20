@@ -4,10 +4,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
-APP="$ROOT/build/Transcribe.app"
+APP="$ROOT/build/.app-staging.noindex/Transcribe.app"
 IDENTITY="${SIGN_IDENTITY:-}"
-VERSION="${APP_VERSION:-2.0.11}"
-BUILD_NUMBER="${APP_BUILD_NUMBER:-13}"
+VERSION="${APP_VERSION:-2.1.0}"
+BUILD_NUMBER="${APP_BUILD_NUMBER:-15}"
 FIXTURE="${TRANSCRIBE_VALIDATION_FIXTURE:-false}"
 SWIFT_OPTIONS=(build -c "$CONFIG" --package-path "$ROOT" --product TranscribeApp --arch arm64)
 case "$FIXTURE" in

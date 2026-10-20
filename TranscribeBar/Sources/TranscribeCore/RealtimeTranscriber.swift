@@ -72,14 +72,9 @@ struct LiveTranscriptionEvent: Sendable {
                      itemID: json["item_id"] as? String,
                      previousItemID: json["previous_item_id"] as? String,
                      hasPreviousItemID: json.keys.contains("previous_item_id"),
-                     text: json["transcript"] as? String ?? json["delta"] as? String,
+                     text: type.hasSuffix(".delta") ? json["delta"] as? String : json["transcript"] as? String,
                      failure: failure, expiresAt: expiry?.isFinite == true ? expiry : nil)
     }
-}
-
-public enum LiveTranscriptionModel: String, Sendable {
-    case live = "gpt-live-transcribe"
-    case committed = "gpt-transcribe"
 }
 
 enum LiveProtocol {
@@ -89,10 +84,9 @@ enum LiveProtocol {
     static let quietCommitDuration = 0.7
     static let signalRMS = 0.0001
     static func configuration(languages: [String], keywords: [String], eventID: String,
-                              model: LiveTranscriptionModel = .live) throws -> Data {
+                              minimalDelay: Bool = false) throws -> Data {
         try checkedHints(languages: languages, keywords: keywords)
-        var transcription: [String: Any] = ["model": model.rawValue]
-        if model == .live { transcription["delay"] = "low" }
+        var transcription: [String: Any] = ["model": Self.model, "delay": minimalDelay ? "minimal" : "low"]
         if !languages.isEmpty { transcription["languages"] = languages }
         if !keywords.isEmpty { transcription["keywords"] = keywords }
         return try JSONSerialization.data(withJSONObject: ["type": "session.update", "event_id": eventID,

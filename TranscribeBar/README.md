@@ -12,7 +12,7 @@ The published installer is signed and notarized. Building from source uses the c
 ```bash
 cd TranscribeBar
 ./scripts/make-app.sh release
-open build/Transcribe.app
+open build/.app-staging.noindex/Transcribe.app
 ```
 
 The app lives in the menu bar. Open Transcribe opens Dictation history. Meetings,
@@ -28,7 +28,7 @@ Recording checks the selected connection first. Missing keys or tokens open Sett
 
 Allow Microphone for recording and Accessibility for double Option and cursor insertion. Online meetings additionally need Screen & System Audio Recording. macOS may require quitting and reopening after granting that permission. In-person meetings and dictation only use the microphone.
 
-Audio and text needed for transcription, dictation formatting and meeting notes are sent to OpenAI. Recordings and history are stored on this Mac. Let participants know before recording.
+Audio and text needed for transcription and meeting notes are sent to OpenAI. Recordings and history are stored on this Mac. Let participants know before recording.
 
 ## Dictation
 
@@ -40,23 +40,20 @@ Audio and text needed for transcription, dictation formatting and meeting notes 
 - Escape cancels insertion and keeps the captured audio. Recover in the chip or history to transcribe it; recovery never inserts automatically.
 - Option–Shift–V pastes the last dictation at the current editable cursor. Disable this shortcut in Settings if needed. The menu and history also provide copy actions.
 
-Dictation uses `gpt-transcribe`, with its existing conservative transcription prompt.
-After saving the raw transcript, the native app uses `gpt-6-luna` with
-`reasoning_effort: none` for paragraphs, punctuation and quotation marks around clear
-direct speech. An ordered fidelity check rejects changed words, accents, numbers or
-technical symbols. Provider failures and timeouts keep the original text. Accepted
-formatting is saved before insertion; the raw transcript remains in the local record.
-The owner verified natural paragraph formatting with real dictation; broader formatting quality remains owner-tested. Dictionary terms
-remain optional recognition hints. Meetings and CLI transcription do not use this second pass.
+Dictation uses `gpt-live-transcribe` continuously while you speak. There is one
+mode, with no grammar/style toggle, timed transcription chunks, overlap assembly,
+or final editing request. Draft words appear in History; only the completed,
+saved transcript can be pasted when you stop. Dictionary terms remain recognition
+hints. OpenAI and Team connections use the same dictation model.
 
-**Local speed experiment:** Faster dictation is one optional switch for OpenAI.
-It recognizes overlapping chunks while you speak, then makes one final text request
-to assemble them and add punctuation, using Luna's Fast tier. There is no audio
-boundary-recheck stage. Incomplete background recognition falls back to ordinary
-whole-recording transcription and formatting, preserving the original saved turns.
-The approximate audio overhead during continuous speech is 1.1×. The Live selector
-and performance footer have been removed. [Single-prompt notes](../docs/DICTATION-SINGLE-PASS.md)
-record the real four-minute trial, the correction and current validation.
+If recognition fails, the retained audio can be replayed through the same live
+model. Adjacent capture files share one continuous transcription item; file
+rotation is storage only. Recovery runs at recording pace to keep uploads and
+memory bounded, so retrying a long recording takes time. Historical retries never
+paste automatically. Meetings retain their separate transcript and notes flow.
+
+[The dictation decision record](../docs/DICTATION-DECISION.md) explains the retired
+experiments, measured timings, and the choice of one continuous model.
 
 Audio is kept for seven days after successful completion by default, with 30 days
 or Forever also available. Failed/cancelled/partial attempts remain recoverable and
@@ -104,7 +101,7 @@ If you have 2.0.8 or earlier, install the current Mac download once to receive f
 swift run transcribe-core selftest
 ./scripts/test-native.sh
 ./scripts/test-coordinator.sh
-./scripts/verify-app.sh build/Transcribe.app --launch
+./scripts/verify-app.sh build/.app-staging.noindex/Transcribe.app --launch
 ```
 
 The checks use Command Line Tools without XCTest or network credentials. A local launch is not a notarization check.

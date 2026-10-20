@@ -419,3 +419,15 @@ Existing updater-capable installations receive the release on their next schedul
 check. The owner's running local trial app was left undisturbed during publication;
 no recording, history, clipboard or credential changes were made by release checks.
 Unrelated Figma state edits and personal Markdown exports were preserved and not staged.
+
+## 2026-10-19 · Continuous dictation consolidation for 2.1.0
+
+The owner accepted the locally tested continuous model and requested removal of
+the other dictation modes and post-processing. [The decision record](DICTATION-DECISION.md)
+retains the experiments and measured tradeoffs. New dictation always uses
+`gpt-live-transcribe` with minimal delay, including Team connections. Saved-audio
+retry replays through the same live model; meeting behavior stays separate.
+The grammar/speed settings, final editor, assembly request, format retry task and
+overlap/cut controller branches have been removed. Historical schema fields stay
+decodable, with no rewrite of saved transcripts. Build staging and notarization
+now use `.noindex` folders to avoid filling the owner's application launcher.
