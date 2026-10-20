@@ -4,13 +4,13 @@
 
 A Mac app that turns speech into text. Use it to dictate into any app, or to record a meeting and get a transcript and notes.
 
-**[Download Transcribe 2.0.11 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.0.11/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
+**[Download Transcribe 2.1.0 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
 
 https://github.com/user-attachments/assets/d4a4af78-cfd9-4e01-9ce1-a4d9795d30bd
 
 ## Dictation
 
-Double-tap Option and talk. Tap Option once to finish, and the text is pasted where your cursor is: an email, a chat, a document, a terminal.
+Dictation transcribes continuously while you speak. Double-tap Option and talk. Tap Option once to finish, and the text is pasted where your cursor is: an email, a chat, a document, a terminal.
 
 <img src="docs/assets/dictation.svg" alt="Double-tap Option, speak, tap Option again, and the text is pasted into an email at the cursor." width="100%">
 

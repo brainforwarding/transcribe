@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Install
 
-[Download Transcribe 2.0.11](https://github.com/brainforwarding/transcribe/releases/download/v2.0.11/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The installer is signed, notarized and stapled. Public distribution checks are recorded in [the implementation state](../docs/IMPLEMENTATION.md). [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.0.11).
+[Download Transcribe 2.1.0](https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The installer is signed, notarized and stapled. Public distribution checks are recorded in [the implementation state](../docs/IMPLEMENTATION.md). [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.1.0).
 
 ## Run from source
 

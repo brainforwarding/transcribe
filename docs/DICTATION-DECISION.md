@@ -1,6 +1,6 @@
 # One continuous dictation model
 
-19 October 2026. Target release 2.1.0, build 15.
+Decision made 19 October 2026. Released 20 October 2026 as 2.1.0, build 15.
 
 The owner tested continuous dictation and chose its speed and direct output over
 additional grammar/style processing. Native Mac dictation now has one path:

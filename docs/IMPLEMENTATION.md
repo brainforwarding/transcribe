@@ -448,8 +448,21 @@ byte-identical after launch. Spotlight finds one installed copy. Rollback is a
 compressed archive and old app bundles are in Trash. Release artifacts and safe
 receipts are under ignored `TranscribeBar/build/.release-2.1.0.noindex/`.
 
-Public release/feed and the Team server remain unchanged pending explicit approval
-for the prepared production relay deployment. Its dry run succeeded. Deploy the
-frozen relay before publishing the app, then publish the exact notarized DMG,
-generate and verify the signed appcast using `prepare-appcast.sh`, and update the
-public download links. This is pending work, not a completed public release.
+## 2026-10-20 · 2.1.0 public release
+
+The owner explicitly authorized the Team deployment and public app release.
+Frozen relay sources passed 82 offline checks, then deployed to production with
+existing secrets/ordinary runtime variables preserved. Cloudflare confirms version
+`310c2ce1-3d7a-4015-a02b-bb134a69df51` at 100%. An unauthenticated production
+live request returns the expected 401. No production credential was changed.
+
+Source tag `v2.1.0` points to freeze `596502e74d99538e31fbc94b1307c6fd4642a9fc`.
+The public [2.1.0 release](https://github.com/brainforwarding/transcribe/releases/tag/v2.1.0)
+contains the exact notarized 3,545,198-byte DMG and SHA256SUMS. GitHub's asset digest
+matches `2683c0c38f62fd510f86eb62df9aad92a03e865c9a7e42794d50c661d16aafcb`.
+`prepare-appcast.sh` independently downloaded the public asset and compared its
+bytes to the notarized artifact, generated and verified the signed build-15 feed
+and archive signatures, retained builds 13/12/11, and checked macOS/arm64 constraints.
+The exact signed XML is published in `docs/updates/appcast.xml`, with current
+README download links updated to 2.1.0. Final public-feed and contained-app download
+verification receipts are recorded under the ignored release artifact directory.
