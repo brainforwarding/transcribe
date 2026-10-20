@@ -466,3 +466,13 @@ and archive signatures, retained builds 13/12/11, and checked macOS/arm64 constr
 The exact signed XML is published in `docs/updates/appcast.xml`, with current
 README download links updated to 2.1.0. Final public-feed and contained-app download
 verification receipts are recorded under the ignored release artifact directory.
+
+Final unauthenticated public fetches matched the exact signed candidate XML and
+published SHA256SUMS. The public installer was mounted read-only; the contained
+app passed strict signatures, staple/Gatekeeper, resources, architecture and
+version/build validation. Its executable exactly matches the installed 2.1.0.
+The mounted volume was detached. All 72 records from the installation snapshot
+remain byte-identical, and Spotlight still reports only `/Applications/Transcribe.app`.
+The public default release is 2.1.0 (neither draft nor prerelease), and its signed
+feed announces build 15 with builds 13/12/11 retained. No required release work
+remains; unrelated Figma state and personal Markdown exports were untouched.
