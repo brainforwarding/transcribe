@@ -431,3 +431,25 @@ The grammar/speed settings, final editor, assembly request, format retry task an
 overlap/cut controller branches have been removed. Historical schema fields stay
 decodable, with no rewrite of saved transcripts. Build staging and notarization
 now use `.noindex` folders to avoid filling the owner's application launcher.
+
+Source freeze `596502e74d99538e31fbc94b1307c6fd4642a9fc` passed the complete core
+suite, 40 actual coordinator cases, 94 native checks, 30 updater checks, 15 live
+follow checks and 82 relay checks. The normal executable excludes retired editor,
+assembly and benchmark symbols. The source manifest matches the packaged build.
+Apple accepted both the app (`48100b03-4f8c-434f-b672-beb0e097ced3`) and DMG
+(`05cc81a6-fa05-4e6f-a15e-a7fdcf2cc09c`). Installer SHA256 is
+`2683c0c38f62fd510f86eb62df9aad92a03e865c9a7e42794d50c661d16aafcb`
+(3,545,198 bytes). Distribution checks include the app inside the mounted installer.
+
+Notarized 2.1.0/build 15 is installed in `/Applications/Transcribe.app`; actual UI
+launch shows no grammar/speed switch, OpenAI selected, seven-day audio retention,
+and meeting-summary controls preserved. All 72 existing record JSON files were
+byte-identical after launch. Spotlight finds one installed copy. Rollback is a
+compressed archive and old app bundles are in Trash. Release artifacts and safe
+receipts are under ignored `TranscribeBar/build/.release-2.1.0.noindex/`.
+
+Public release/feed and the Team server remain unchanged pending explicit approval
+for the prepared production relay deployment. Its dry run succeeded. Deploy the
+frozen relay before publishing the app, then publish the exact notarized DMG,
+generate and verify the signed appcast using `prepare-appcast.sh`, and update the
+public download links. This is pending work, not a completed public release.
