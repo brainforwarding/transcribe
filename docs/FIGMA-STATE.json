@@ -91,8 +91,10 @@
   "targetVersion": "2.0.10",
   "currentBoardID": "72:567",
   "archiveBoardIDs": [
+    "8:1399",
     "5:1445",
-    "6:1411"
+    "6:1411",
+    "7:1411"
   ],
   "settingsScreenIDs": [
     "87:799",
@@ -394,5 +396,21 @@
     "reduceMotion": "Instant scroll.",
     "lifecycle": "Cancel pending scroll on pause, record change and disappearance.",
     "selection": "Preserve native text selection."
-  }
+  },
+  "pages": {
+    "start": "0:1",
+    "current": "2:2042",
+    "components": "2:2045",
+    "archive": "2:2043"
+  },
+  "startIndexID": "112:2",
+  "parityScreensBoardID": "110:651",
+  "parityScreens": {
+    "setup": "110:655",
+    "dictionary": "110:890",
+    "newMeeting": "111:693",
+    "meetingsEmpty": "111:919",
+    "statusMenu": "111:1986"
+  },
+  "cleanup2026-10-14": "Pages: 00 Start here (index), 01 Current app 2.0.10 (dictation 72:567 + meetings 88:292 + parity board 110:651), 02 Components, 99 Archive. Window titles set to 'Transcribe' and credits notice to source copy. Parity screens are light only."
 }

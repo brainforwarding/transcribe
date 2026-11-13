@@ -1,0 +1,30 @@
+{
+  "fileKey": "501FiwrHn8ZJlwbgzjTDly",
+  "pageID": "114:757",
+  "lightBoardID": "117:212",
+  "darkBoardID": "117:319",
+  "status": "Designed before implementation; final light/dark compositions visually checked",
+  "fontFamily": "Urbanist",
+  "boards": {
+    "size": [944, 1220],
+    "descendantsPerBoard": 86,
+    "nodeTypesPerBoard": {"TEXT": 39, "FRAME": 18, "INSTANCE": 20, "SLOT": 3, "VECTOR": 5, "ELLIPSE": 1},
+    "fontMismatches": 0,
+    "imageFilledNodes": 0
+  },
+  "reusedComponents": ["Local / Native preference row", "Button", "Switch", "Native picker", "Dictation chip / ready"],
+  "review": {"model": "gpt-6.1-sol", "reasoningEffort": "high", "spec": "docs/DICTATION-USABILITY-SPEC.md"},
+  "notes": [
+    "Boards show mutually exclusive runtime states together for review.",
+    "Shipped screens, the pre-existing FIGMA-STATE.json edits and unrelated proposals were preserved.",
+    "Native controls reuse CirclesButtonStyle, StatusPill and DesignSystem semantic colors.",
+    "Offscreen native UI render validation does not prove global keyboard delivery, Dock activation or insertion into external apps."
+  ],
+  "nativeRenderExamples": [
+    "/tmp/transcribe-usability-settings-light.png",
+    "/tmp/transcribe-usability-settings-dark.png",
+    "/tmp/transcribe-usability-check-light.png",
+    "/tmp/transcribe-usability-check-dark.png",
+    "/tmp/transcribe-usability-chip-light-Check-paste.png"
+  ]
+}

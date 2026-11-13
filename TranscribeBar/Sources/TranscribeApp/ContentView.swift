@@ -1,8 +1,12 @@
 import SwiftUI
 import TranscribeCore
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @State private var dropping = false
+    @State private var dropKind: SessionKind = .meeting
+    @State private var windowWidth: CGFloat = 0
     var body: some View {
         Group {
             if let active = model.activeRecord, active.kind == .meeting, model.phase == .starting || model.phase == .recording {
@@ -32,6 +36,10 @@ struct ContentView: View {
                 HStack(alignment: .top, spacing: 12) {
                     Text(message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.body)
                         .fixedSize(horizontal: false, vertical: true)
+                    if model.lastDeleted != nil && message == "Dictation deleted" {
+                        Button("Undo") { model.undoDelete() }.buttonStyle(.plain)
+                            .font(DesignSystem.font(13, weight: .semibold)).foregroundStyle(DesignSystem.link)
+                    }
                     Button { model.statusDetail = "" } label: {
                         DesignIcon(name: "chip-imgIconClose", size: 12, color: DesignSystem.muted)
                             .frame(width: 24, height: 24).background(DesignSystem.subtle, in: Circle())
@@ -43,12 +51,49 @@ struct ContentView: View {
                 .shadow(color: DesignSystem.shadow, radius: 6, y: 4).padding(16)
             }
         }
+        .background(GeometryReader { proxy in
+            Color.clear.onAppear { windowWidth = proxy.size.width }.onChange(of: proxy.size.width) { windowWidth = $0 }
+        })
+        .overlay {
+            if dropping {
+                HStack(spacing: 12) {
+                    dropZone("Meeting", icon: "history-imgIconVideo", active: dropKind == .meeting)
+                    dropZone("Dictation", icon: "history-imgIconMicrophone", active: dropKind == .dictation)
+                }.padding(12)
+                    .background(DesignSystem.surface.opacity(0.94))
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], delegate: FileDrop(enabled: !validationFixture, dropping: $dropping, kind: $dropKind,
+                                                   width: windowWidth) { urls, kind in
+            model.meetingSetupPresented = false; model.searchText = ""
+            model.importAudioFiles(urls, as: kind)
+        })
         .onAppear {
 #if !TRANSCRIBE_VALIDATION_FIXTURE
             Task { await model.refreshPermissions(); model.refreshMics() }
 #endif
         }
         .onChange(of: model.activeSessionID) { id in if id != nil { model.meetingSetupPresented = false } }
+        .alert(deleteTitle, isPresented: Binding(get: { model.meetingToDelete != nil }, set: { if !$0 { model.meetingToDelete = nil } })) {
+            Button("Cancel", role: .cancel) { model.meetingToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let id = model.meetingToDelete { model.delete(id) }
+                model.meetingToDelete = nil
+            }
+        } message: {
+            Text("The transcript and the recording move to the Trash. The exported file in your Meeting exports folder is kept.")
+        }
+    }
+    /// Where the file is released is the choice: the left half makes a meeting, the right a dictation.
+    private func dropZone(_ title: String, icon: String, active: Bool) -> some View {
+        VStack(spacing: 12) {
+            DesignIcon(name: icon, size: 34, color: active ? DesignSystem.action : DesignSystem.muted)
+            Text(title).font(DesignSystem.font(20, weight: .bold)).foregroundStyle(active ? DesignSystem.primary : DesignSystem.muted)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(active ? DesignSystem.action.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(active ? DesignSystem.action : DesignSystem.border,
+                                                                    style: StrokeStyle(lineWidth: 2, dash: [8, 6])))
     }
     private var validationFixture: Bool {
 #if TRANSCRIBE_VALIDATION_FIXTURE
@@ -58,6 +103,10 @@ struct ContentView: View {
 #endif
     }
     private var freezeContent: Bool { validationFixture || model.updateInProgress }
+    private var deleteTitle: String {
+        let title = model.records.first { $0.id == model.meetingToDelete }?.title ?? "meeting"
+        return "Delete “\(title)”?"
+    }
     private var generalNotice: String? {
         let message = model.statusDetail.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !model.records.contains(where: { record in
@@ -113,15 +162,38 @@ struct ContentView: View {
                 .overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1))
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.filteredRecords) { record in
-                        Button { model.selectRecord(record.id) } label: { HistoryRow(record: record, selected: model.selectedRecordID == record.id) }.buttonStyle(.plain)
+                    ForEach(dayGroups, id: \.date) { group in
+                        Text(dayTitle(group.date)).font(DesignSystem.font(13, weight: .semibold)).foregroundStyle(DesignSystem.muted).padding(.top, 4)
+                        ForEach(group.records) { record in
+                            Button { model.selectRecord(record.id) } label: { HistoryRow(record: record, selected: model.selectedRecordID == record.id) }.buttonStyle(.plain)
+                                .contextMenu {
+                                    Button("Delete meeting…", role: .destructive) { model.meetingToDelete = record.id }.disabled(!model.canDelete(record.id))
+                                }
+                        }
                     }
-                    if model.filteredRecords.isEmpty { Text(model.searchText.isEmpty ? "No recordings yet" : "No results").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).padding(.vertical, 24) }
+                    if model.filteredRecords.isEmpty && !model.searchText.isEmpty { Text("No results").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).padding(.vertical, 24) }
                 }
             }
         }.padding(16).frame(width: model.sidebar == .meetings ? 308 : 340).frame(maxHeight: .infinity).background(DesignSystem.page)
     }
-    private var emptyDetail: some View {
+    private var dayGroups: [(date: Date, records: [SessionRecord])] {
+        let groups = Dictionary(grouping: model.filteredRecords) { Calendar.current.startOfDay(for: $0.startedAt) }
+        return groups.keys.sorted(by: >).map { ($0, groups[$0]!.sorted { $0.startedAt > $1.startedAt }) }
+    }
+    private func dayTitle(_ date: Date) -> String {
+        if Calendar.current.isDateInToday(date) { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        return date.formatted(date: .abbreviated, time: .omitted)
+    }
+    @ViewBuilder private var emptyDetail: some View {
+        if model.sidebar == .meetings {
+            VStack {
+                Button("New meeting") { model.meetingSetupPresented = true }
+                    .buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(model.isBusy || validationFixture)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else { dictationEmptyDetail }
+    }
+    private var dictationEmptyDetail: some View {
         VStack(alignment: .leading, spacing: 24) {
             Text(model.sidebar == .meetings ? "Meeting notes" : "Speak where you work").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
             Text(model.sidebar == .meetings ? "Keep your notes, transcript and summary together." : "Double-tap Option to start. Tap Option once to finish.").foregroundStyle(DesignSystem.muted)
@@ -133,29 +205,43 @@ struct ContentView: View {
 }
 
 struct HistoryRow: View {
+    @EnvironmentObject var model: AppModel
     let record: SessionRecord
     let selected: Bool
+    private var transcribing: Bool {
+        record.status == .processing || (model.activeSessionID == record.id && [.stopping, .transcribing].contains(model.phase))
+    }
+    private var timeLine: String {
+        let time = record.startedAt.formatted(date: .omitted, time: .shortened)
+        return record.duration > 0 ? time + " · " + minutes(record.duration) : time
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(record.title).font(DesignSystem.font(15, weight: .semibold)).lineLimit(2)
-            Text(record.hasText ? record.transcript : record.canRecover ? "Recording available for transcription." : record.preview).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).lineLimit(2)
-            Text("\(record.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(duration(record.duration)) · \(record.statusLabel)").font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted).lineLimit(2)
+            Text(record.listLine(transcribing: transcribing)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).lineLimit(2)
+            Text(timeLine).font(DesignSystem.font(12)).foregroundStyle(DesignSystem.muted).lineLimit(1)
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .background(selected ? DesignSystem.selected : Color.clear, in: RoundedRectangle(cornerRadius: 12))
             .contentShape(RoundedRectangle(cornerRadius: 12)).accessibilityElement(children: .combine)
     }
 }
 
+func minutes(_ seconds: Double) -> String {
+    seconds < 60 ? "\(max(1, Int(seconds.rounded()))) s" : "\(Int((seconds / 60).rounded())) min"
+}
+
 struct EditableRecordTitle: View {
     @EnvironmentObject var model: AppModel
     let record: SessionRecord
     @State private var title = ""
+    @State private var shown = ""
     @FocusState private var focused: Bool
     var body: some View {
         TextField("Untitled", text: Binding(get: { title }, set: { value in
             title = value; model.stageTitle(record.id, value)
         })).textFieldStyle(.plain).font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
-            .onAppear { title = record.title }.onChange(of: record.id) { _ in title = record.title }
+            .onAppear { title = record.title; shown = record.title }
+            .onChange(of: record.title) { new in if title == shown { title = new }; shown = new }
             .focused($focused)
             .onSubmit(commit)
             .onChange(of: focused) { active in if !active { commit() } }
@@ -171,31 +257,34 @@ struct EditableRecordTitle: View {
 
 }
 
-struct RecordIssuesView: View {
-    let record: SessionRecord
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if record.isPartial { Text("Partial transcript").font(DesignSystem.font(15, weight: .semibold)) }
-            ForEach(Array(record.issues.enumerated()), id: \.offset) { _, issue in Text(issue).font(DesignSystem.font(13)) }
-        }.foregroundStyle(DesignSystem.warning).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(DesignSystem.warningBackground, in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-extension SessionRecord {
-    var statusLabel: String {
-        switch status {
-        case .starting: return "Starting"
-        case .recording: return "Recording"
-        case .processing: return "Transcribing"
-        case .partial: return "Partial"
-        case .cancelled: return "Recoverable"
-        case .failed: return "Retry needed"
-        case .complete:
-            if kind == .meeting { return "Complete" }
-            switch delivery { case .inserted: return "Inserted"; case .cancelled: return "Saved"; default: return "Ready to copy" }
-        }
-    }
-}
 func duration(_ seconds: Double) -> String {
     let n = max(0, Int(seconds)); return "\(n / 60):\(String(format: "%02d", n % 60))"
+}
+
+private struct FileDrop: DropDelegate {
+    let enabled: Bool
+    @Binding var dropping: Bool
+    @Binding var kind: SessionKind
+    let width: CGFloat
+    let perform: @MainActor ([URL], SessionKind) -> Void
+    private func side(_ info: DropInfo) -> SessionKind { info.location.x < width / 2 ? .meeting : .dictation }
+    func validateDrop(info: DropInfo) -> Bool { enabled && info.hasItemsConforming(to: [.fileURL]) }
+    func dropEntered(info: DropInfo) { kind = side(info); dropping = true }
+    func dropUpdated(info: DropInfo) -> DropProposal? { kind = side(info); return DropProposal(operation: .copy) }
+    func dropExited(info: DropInfo) { dropping = false }
+    func performDrop(info: DropInfo) -> Bool {
+        dropping = false
+        let target = side(info)
+        let providers = info.itemProviders(for: [.fileURL])
+        guard enabled, !providers.isEmpty else { return false }
+        Task { @MainActor in
+            var urls: [URL] = []
+            for provider in providers {
+                if let data = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? Data,
+                   let file = URL(dataRepresentation: data, relativeTo: nil) { urls.append(file) }
+            }
+            if !urls.isEmpty { perform(urls, target) }
+        }
+        return true
+    }
 }

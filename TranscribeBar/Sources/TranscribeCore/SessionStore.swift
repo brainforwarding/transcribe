@@ -32,6 +32,7 @@ public final class SessionStore {
 
     public func load() throws -> [SessionRecord] {
         loadIssues = []
+        removeStaleImports()
         let dirs = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         var records: [SessionRecord] = []
         for dir in dirs where UUID(uuidString: dir.lastPathComponent) != nil {
@@ -101,6 +102,30 @@ public final class SessionStore {
         return imported
     }
 
+    /// Moves a record's whole folder (record.json, audio, chunks, Ogg copy) out of the
+    /// store through `trash` and returns where it went. Exports elsewhere are untouched.
+    public func moveToTrash(_ id: UUID, using trash: (URL) throws -> URL) throws -> URL {
+        let dir = directory(for: id)
+        guard fm.fileExists(atPath: dir.path) else { throw CocoaError(.fileNoSuchFile) }
+        return try trash(dir)
+    }
+
+    /// Puts a trashed folder back under its id and reads it. Refuses to overwrite.
+    public func restore(from trashed: URL, id: UUID) throws -> SessionRecord {
+        let dir = directory(for: id)
+        guard !fm.fileExists(atPath: dir.path) else { throw CocoaError(.fileWriteFileExists) }
+        guard fm.fileExists(atPath: trashed.appendingPathComponent("record.json").path) else { throw CocoaError(.fileNoSuchFile) }
+        try fm.moveItem(at: trashed, to: dir)
+        do {
+            let record = try decoder.decode(SessionRecord.self, from: Data(contentsOf: dir.appendingPathComponent("record.json")))
+            guard record.id == id else { throw CocoaError(.fileReadCorruptFile) }
+            return record
+        } catch {
+            try? fm.moveItem(at: dir, to: trashed)
+            throw error
+        }
+    }
+
     /// Expire only new, successfully completed recordings with an explicit completion
     /// timestamp. Old unmanaged audio and failed/cancelled attempts are never purged.
     public func purgeExpiredAudio(records: [SessionRecord], days: Int, now: Date = Date()) throws {
@@ -115,8 +140,10 @@ public final class SessionStore {
 
     /// Called only after durable, complete text, capture completion and final readers.
     /// Delete only referenced artifacts belonging to this UUID directory.
-    public func cleanAudio(for record: SessionRecord) throws {
-        guard record.status == .complete, record.formattingFailure == nil, !record.captureIncomplete, record.hasSealedMeetingAudio else { return }
+    /// Returns the record as saved: an owned Ogg copy is deleted and `importedAudio` cleared.
+    @discardableResult
+    public func cleanAudio(for record: SessionRecord) throws -> SessionRecord {
+        guard record.status == .complete, record.formattingFailure == nil, !record.captureIncomplete, record.hasSealedMeetingAudio else { return record }
         let owned = directory(for: record.id).standardizedFileURL.path + "/"
         for url in record.tracks.flatMap({ $0.spans.map(\.url) }) {
             guard url.standardizedFileURL.path.hasPrefix(owned) else { continue }
@@ -124,5 +151,11 @@ public final class SessionStore {
         }
         let chunks = directory(for: record.id).appendingPathComponent("chunks", isDirectory: true)
         if fm.fileExists(atPath: chunks.path) { try fm.removeItem(at: chunks) }
+        var record = record
+        if let copy = record.importedAudio, copy.standardizedFileURL.path.hasPrefix(owned) {
+            if fm.fileExists(atPath: copy.path) { try fm.removeItem(at: copy) }
+            record.importedAudio = nil; try save(record)
+        }
+        return record
     }
 }

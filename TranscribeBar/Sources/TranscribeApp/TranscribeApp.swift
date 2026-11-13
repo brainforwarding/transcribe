@@ -78,7 +78,7 @@ struct TranscribeInsertionDiagnostics {
         })
         switch result {
             case .inserted: diagnostics["insertOutcome"] = "inserted"
-            case .ready(let reason): diagnostics["insertOutcome"] = "ready"; diagnostics["insertReason"] = reason
+            case .ready(let reason, _): diagnostics["insertOutcome"] = "ready"; diagnostics["insertReason"] = reason
             case .unconfirmed(let reason): diagnostics["insertOutcome"] = "unconfirmed"; diagnostics["insertReason"] = reason
         }
         var value: CFTypeRef?
@@ -102,6 +102,12 @@ struct TranscribeApp: App {
     var body: some Scene {
         // No window scene — the AppDelegate owns the menu-bar status item + popover.
         Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .newItem) {
+                    Button("Open…") { delegate.openAudioFiles() }.keyboardShortcut("o")
+                    Button("Import Recordings…") { delegate.importRecordings() }
+                }
+            }
     }
 }
 #endif

@@ -4,6 +4,8 @@ import SwiftUI
 struct ConfirmedCopyButton: View {
     let accessibilityLabel: String
     var icon: String? = nil
+    var iconFrame: CGFloat = 24
+    var title = "Copy"
     let action: () -> Bool
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
     @State private var copied = false
@@ -14,13 +16,13 @@ struct ConfirmedCopyButton: View {
             if let icon {
                 ZStack {
                     DesignIcon(name: copied ? "chip-imgIconTickCircle" : icon,
-                               size: 12, color: copied ? DesignSystem.success : DesignSystem.muted)
+                               size: iconFrame < 24 ? 10 : 12, color: copied ? DesignSystem.success : DesignSystem.muted)
                         .id(copied).transition(.opacity)
-                }.frame(width: 24, height: 24).background(DesignSystem.subtle, in: Circle())
+                }.frame(width: iconFrame, height: iconFrame).background(DesignSystem.subtle, in: Circle())
             } else {
                 ZStack {
-                    Text("Copied").hidden().accessibilityHidden(true)
-                    Text(copied ? "Copied" : "Copy").id(copied).transition(.opacity)
+                    Text(title.count > 6 ? title : "Copied").hidden().accessibilityHidden(true)
+                    Text(copied ? "Copied" : title).id(copied).transition(.opacity)
                 }
             }
         }

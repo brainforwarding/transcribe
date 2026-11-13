@@ -16,10 +16,11 @@ struct CLI {
 
         switch cmd {
         case "selftest":
-            let failures = mergeSelftest() + namingSelftest() + micInputSelftest()
+            let failures = mergeSelftest() + namingSelftest() + micInputSelftest() + meetingTextSelftest()
             let contractsPassed = await runTranscriptionSelftests()
             let storePassed = runSessionStoreSelftests()
-            if failures.isEmpty && contractsPassed && storePassed { print("selftest: ALL MERGE + NAMING + CORE CONTRACT + STORE TESTS PASSED"); exit(0) }
+            let importPassed = await runAudioImportSelftests()
+            if failures.isEmpty && contractsPassed && storePassed && importPassed { print("selftest: ALL MERGE + NAMING + CORE CONTRACT + STORE TESTS PASSED"); exit(0) }
             err("selftest FAILED: \(failures.joined(separator: ", "))"); exit(1)
 
         case "mics":

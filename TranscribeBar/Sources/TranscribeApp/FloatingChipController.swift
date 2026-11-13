@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+/// Keeps the panel exactly the size of the chip; the bottom-left corner stays put.
+private final class FittingHostingView<Content: View>: NSHostingView<Content> {
+    override func invalidateIntrinsicContentSize() {
+        super.invalidateIntrinsicContentSize()
+        DispatchQueue.main.async { [weak self] in self?.fitWindow() }
+    }
+    func fitWindow() {
+        guard let window else { return }
+        let size = fittingSize
+        guard size.width > 0, size.height > 0, window.frame.size != size else { return }
+        window.setContentSize(size)
+    }
+}
+
 private final class NonactivatingChipPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -12,10 +26,11 @@ final class FloatingChipController {
     private var panel: NSPanel?
     private var screenObserver: NSObjectProtocol?
 
-    func show<V: View>(_ view: V, width: CGFloat = 192) {
+    func show<V: View>(_ view: V) {
         let panel = self.panel ?? makePanel()
-        panel.setContentSize(NSSize(width: width, height: 34))
-        panel.contentView = NSHostingView(rootView: view)
+        let host = FittingHostingView(rootView: view)
+        panel.setContentSize(host.fittingSize)
+        panel.contentView = host
         place(panel)
         panel.orderFrontRegardless()
     }
@@ -23,7 +38,7 @@ final class FloatingChipController {
     func hide() { panel?.orderOut(nil) }
 
     private func makePanel() -> NSPanel {
-        let panel = NonactivatingChipPanel(contentRect: NSRect(x: 0, y: 0, width: 192, height: 34),
+        let panel = NonactivatingChipPanel(contentRect: NSRect(x: 0, y: 0, width: 120, height: 26),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isFloatingPanel = true
         panel.level = .floating

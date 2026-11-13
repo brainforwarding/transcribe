@@ -16,6 +16,11 @@ public final class CaptureController: @unchecked Sendable {
     private var started = false
     private var issues: [TranscriptionIssue] = []
     private var systemUnavailable = false
+    private var recovery: SystemAudioRecovery?
+    private var micInfo: [String: Any] = [:]
+    private var systemStops: [[String: Any]] = []
+    private var systemRestarts = 0
+    private var systemRestartFailure: [String: Any]?
     private let previewQueue = DispatchQueue(label: "transcribe.preview.mix", qos: .utility)
     private var nextPreviewOffset = 0.0
     public var onLog: (@Sendable (String) -> Void)?
@@ -43,9 +48,12 @@ public final class CaptureController: @unchecked Sendable {
         system?.onAudioFrame = { [weak self] in self?.onAudioFrame?($0) }
         mic.onLog = { [weak self] in self?.onLog?($0) }
         system?.onLog = { [weak self] in self?.onLog?($0) }
+        system?.onInterrupted = { [weak self] in self?.systemInterrupted(reason: $0 == nil ? "stalled" : "stopped", error: $0) }
+        if system != nil { recovery = SystemAudioRecovery { [weak self] in await self?.restartSystemAudio() } }
     }
     private var isStopped: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
-    private func handleHealth(_ health: CaptureHealth) {
+    private func handleHealth(_ reported: CaptureHealth) {
+        guard let health = reported.source == .system ? recovery?.filter(reported) : reported else { return }
         if health.state == .interrupted || health.state == .unavailable {
             lock.lock()
             let issue = TranscriptionIssue(source: health.source, userMessage: health.message ?? "Audio capture was interrupted.", retryable: false)
@@ -73,7 +81,13 @@ public final class CaptureController: @unchecked Sendable {
         async let macAudio: Void = startSystemIfAvailable()
         do {
             _ = try await microphone
-            try? writeCaptureInfo(microphone: mic.microphoneProcessing)
+            if let microphone = mic.microphoneProcessing {
+                var info: [String: Any] = ["micProcessing": microphone.mode.rawValue]
+                if let note = microphone.note { info["micProcessingNote"] = note }
+                if microphone.mode == .voice, let output = CoreAudioDevices.defaultOutputName() { info["referenceOutput"] = output }
+                lock.withLock { micInfo = info }
+            }
+            try? writeCaptureInfo()
             await macAudio
             guard !isStopped else { throw CancellationError() }
         } catch {
@@ -82,22 +96,44 @@ public final class CaptureController: @unchecked Sendable {
         }
     }
     /// Diagnostics only; nothing reads this file back.
-    private func writeCaptureInfo(microphone: MicProcessing? = nil) throws {
-        var info: [String: Any] = ["epoch": epoch]
-        if let microphone {
-            info["micProcessing"] = microphone.mode.rawValue
-            if let note = microphone.note { info["micProcessingNote"] = note }
-            if microphone.mode == .voice, let output = CoreAudioDevices.defaultOutputName() { info["referenceOutput"] = output }
+    private func writeCaptureInfo() throws {
+        try lock.withLock {
+            var info = micInfo; info["epoch"] = epoch
+            if !systemStops.isEmpty { info["systemAudioStops"] = systemStops }
+            if systemRestarts > 0 { info["systemAudioRestarts"] = systemRestarts }
+            if let systemRestartFailure { info["systemAudioRestartFailure"] = systemRestartFailure }
+            try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
+                .write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
         }
-        try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
-            .write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
+    }
+    private func diagnostic(_ error: NSError?) -> [String: Any] {
+        var entry: [String: Any] = ["atSeconds": (CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) - epoch).rounded()]
+        if let error { entry["domain"] = error.domain; entry["code"] = error.code }
+        return entry
+    }
+    /// Every reason Mac audio went down starts the one restart loop.
+    private func systemInterrupted(reason: String, error: NSError?) {
+        guard !isStopped else { return }
+        var entry = diagnostic(error); entry["reason"] = reason
+        lock.withLock { if systemStops.count < 32 { systemStops.append(entry) } }
+        try? writeCaptureInfo()
+        recovery?.begin()
+    }
+    private func restartSystemAudio() async {
+        guard !isStopped else { return }
+        lock.withLock { systemRestarts += 1 }
+        do { try await retrySystemAudio() }
+        catch { if !isStopped { let entry = diagnostic(error as NSError); lock.withLock { systemRestartFailure = entry } } }
+        try? writeCaptureInfo()
     }
     private func startSystemIfAvailable() async {
         guard let system, !isStopped else { return }
         do { try await system.start() }
         catch {
-            if !isStopped { handleHealth(CaptureHealth(source: .system, state: .unavailable,
-                message: "Mac audio is unavailable. Your microphone is still recording.")) }
+            guard !isStopped else { return }
+            handleHealth(CaptureHealth(source: .system, state: .unavailable,
+                message: "Mac audio is unavailable. Your microphone is still recording."))
+            systemInterrupted(reason: "startFailed", error: error as NSError)
         }
     }
     public func retrySystemAudio() async throws {
@@ -117,6 +153,7 @@ public final class CaptureController: @unchecked Sendable {
     @discardableResult
     public func stop() async -> Result {
         lock.withLock { stopped = true }
+        await recovery?.stop()
         async let sys = system?.stop()
         await mic.stop()
         let systemSummary = await sys

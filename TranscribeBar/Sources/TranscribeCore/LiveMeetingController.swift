@@ -274,7 +274,7 @@ public final class LiveMeetingController: @unchecked Sendable {
                 if continuousDictation { return }
                 let duration = open.end - open.start
                 let quiet = c.lastSignalEnd.map { open.end - $0 } ?? 0
-                let paused = quiet >= LiveProtocol.quietCommitDuration && duration >= LiveProtocol.minimumCommitDuration
+                let paused = quiet >= LiveProtocol.quietCommitDuration && duration >= LiveProtocol.minimumPauseTurnDuration
                 if paused || duration >= LiveProtocol.maximumTurnDuration {
                     await commit(frame.source, stopping: false, reason: paused ? .pause : .forced)
                 }
@@ -344,6 +344,10 @@ public final class LiveMeetingController: @unchecked Sendable {
                 let early = c.early.removeValue(forKey: item) ?? []
                 if !continuousDictation { c.drafts.removeValue(forKey: item) }
                 for buffered in early { await eventReceived(buffered, source: source) }
+                // Announce the turn even when its text was already shown (or throttled) before the ACK.
+                if !continuousDictation, connections[source] === c, c.itemMap[item] == idx {
+                    c.lastDraftAt = Date(); draft(.init(source: source, itemID: item, text: c.drafts[item] ?? "", turnIdx: idx))
+                }
             case "conversation.item.input_audio_transcription.delta", "conversation.item.input_audio_transcription.completed":
                 guard let item = event.itemID, !item.isEmpty, let text = event.text, text.utf8.count <= 65_536 else {
                     await invalidate(source, failure: .invalidResponse); return
@@ -383,7 +387,7 @@ public final class LiveMeetingController: @unchecked Sendable {
                     c.itemMap.removeValue(forKey: item); c.drafts.removeValue(forKey: item)
                     c.completedItems.insert(item)
                     if c.completedItems.count > 1_024 { await invalidate(source, failure: nil, report: false) }
-                    draft(.init(source: source, itemID: item, text: ""))
+                    draft(.init(source: source, itemID: item, text: "", turnIdx: idx))
                 }
             default: break
             }
@@ -391,7 +395,7 @@ public final class LiveMeetingController: @unchecked Sendable {
         private func emitDraft(source: Source, item: String, connection: Connection) {
             guard Date().timeIntervalSince(connection.lastDraftAt) >= 0.1 else { return }
             connection.lastDraftAt = Date()
-            draft(.init(source: source, itemID: item, text: connection.drafts[item] ?? ""))
+            draft(.init(source: source, itemID: item, text: connection.drafts[item] ?? "", turnIdx: connection.itemMap[item]))
         }
         private func invalidate(_ source: Source, failure: ServiceFailureKind?, report: Bool = true) async {
             guard let c = connections.removeValue(forKey: source) else { return }
@@ -403,7 +407,7 @@ public final class LiveMeetingController: @unchecked Sendable {
             }
             do { try await persist(next); turns = next }
             catch { blocked.insert(source); issue(.init(source: source, userMessage: "Meeting words could not be saved. Audio is retained.", failureKind: .storage)) }
-            for item in c.drafts.keys { draft(.init(source: source, itemID: item, text: "")) }
+            for item in c.drafts.keys { draft(.init(source: source, itemID: item, text: "", turnIdx: c.itemMap[item])) }
             if failure?.allowsRecoveryAfterRemedy == true || failure == .invalidHints { blocked.insert(source) }
             failures[source, default: 0] += 1
             nextConnect[source] = Date().addingTimeInterval(min(30, pow(2, Double(min(5, failures[source] ?? 1)))))

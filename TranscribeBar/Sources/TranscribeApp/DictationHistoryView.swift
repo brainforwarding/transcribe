@@ -3,6 +3,7 @@ import TranscribeCore
 
 struct DictationHistoryView: View {
     @EnvironmentObject var model: AppModel
+    @State private var hovered: UUID?
     private struct DayGroup: Identifiable {
         let date: Date
         let records: [SessionRecord]
@@ -109,6 +110,11 @@ struct DictationHistoryView: View {
 
             }.frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 12) {
+                Button("Delete") { model.delete(record.id) }.buttonStyle(.plain)
+                    .font(DesignSystem.font(14, weight: .semibold)).foregroundStyle(DesignSystem.error)
+                    .opacity(hovered == record.id && model.canDelete(record.id) ? 1 : 0)
+                    .allowsHitTesting(hovered == record.id && model.canDelete(record.id))
+                    .accessibilityHidden(true)
                 if record.hasText {
                     ConfirmedCopyButton(accessibilityLabel: "Copy dictation from \(time)") { model.copyTranscript(record.id) }.buttonStyle(.plain)
                         .font(DesignSystem.font(14, weight: .semibold)).foregroundStyle(DesignSystem.link)
@@ -122,7 +128,13 @@ struct DictationHistoryView: View {
                         .help("Retry saved recording")
                 }
             }
-        }.padding(.vertical, 16).accessibilityElement(children: .contain)
+        }.padding(.vertical, 16).contentShape(Rectangle()).accessibilityElement(children: .contain)
+            .onHover { inside in if inside { hovered = record.id } else if hovered == record.id { hovered = nil } }
+            .accessibilityAction(named: "Delete") { model.delete(record.id) }
+            .contextMenu {
+                if record.hasText { Button("Copy") { model.copyTranscript(record.id) } }
+                Button("Delete") { model.delete(record.id) }.disabled(!model.canDelete(record.id))
+            }
     }
 
     private func isCaptureActive(_ record: SessionRecord) -> Bool {

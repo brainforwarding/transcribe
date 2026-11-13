@@ -82,7 +82,10 @@ enum LiveProtocol {
     static let minimumCommitDuration = 0.25 // conservatively exceeds the 100 ms empty/short buffer boundary
     static let maximumTurnDuration = 10.0
     static let quietCommitDuration = 0.7
-    static let signalRMS = 0.0001
+    /// A pause ends a turn only once it is this long; caps commits in a burst of short replies.
+    static let minimumPauseTurnDuration = 2.0
+    /// Above the voice-processed microphone's noise floor (quietest tenth ~0.0007).
+    static let signalRMS = 0.004
     static func configuration(languages: [String], keywords: [String], eventID: String,
                               minimalDelay: Bool = false) throws -> Data {
         try checkedHints(languages: languages, keywords: keywords)

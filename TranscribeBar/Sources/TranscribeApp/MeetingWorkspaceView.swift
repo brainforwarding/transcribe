@@ -10,97 +10,63 @@ struct MeetingSetupView: View {
                 Text("New meeting").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
                 TextField("Meeting title", text: $model.meetingTitle).textFieldStyle(.plain).padding(.horizontal, 16).frame(height: 44)
                     .background(DesignSystem.surface, in: Capsule()).overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1))
-                Picker("Meeting mode", selection: $model.meetingMode) { Text("Online meeting").tag(MeetingMode.online); Text("In person").tag(MeetingMode.inPerson) }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 340, alignment: .leading)
-                HStack { DesignIcon(name: "meetingSetup-imgIconMicrophone1", size: 20); Text("Microphone").font(DesignSystem.font(15, weight: .semibold)); Spacer(); MicrophonePicker().frame(width: 250) }.padding(16).background(DesignSystem.page, in: RoundedRectangle(cornerRadius: 12))
-                if model.meetingMode == .online {
-                    HStack {
-                        DesignIcon(name: "meetingSetup-imgIconMonitor", size: 20)
-                        VStack(alignment: .leading, spacing: 4) { Text("Mac audio").font(DesignSystem.font(15, weight: .semibold)); Text("Records all audio playing on this Mac.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted) }
-                        Spacer()
-                        if model.screenGranted { StatusPill(title: "Allowed", color: DesignSystem.success, background: DesignSystem.successBackground) }
-                        else { Button("Allow") { model.grantScreen() }.buttonStyle(CirclesButtonStyle()) }
-                    }.padding(16).background(DesignSystem.page, in: RoundedRectangle(cornerRadius: 12))
+                HStack(spacing: 12) {
+                    Picker("Meeting mode", selection: $model.meetingMode) { Text("Online meeting").tag(MeetingMode.online); Text("In person").tag(MeetingMode.inPerson) }.labelsHidden().pickerStyle(.segmented).fixedSize()
+                    if !model.meetingLanguageOptions.isEmpty {
+                        Picker("Language", selection: Binding(get: { model.languageIDs.contains(model.meetingLanguage) ? model.meetingLanguage : "" },
+                                                              set: { model.meetingLanguage = $0 })) {
+                            ForEach(model.meetingLanguageOptions) { Text($0.name).tag($0.id) }
+                        }.labelsHidden().fixedSize()
+                    }
                 }
-                Text("Let everyone know before you record.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+                // Configuration lives in Settings; only the first thing blocking this meeting shows here.
+                if let blocker {
+                    HStack(spacing: 12) {
+                        Text(blocker.message).font(DesignSystem.font(15)).foregroundStyle(DesignSystem.body)
+                        Button(blocker.action, action: blocker.perform).buttonStyle(CirclesButtonStyle()).disabled(model.updateInProgress)
+                    }
+                }
                 HStack(spacing: 12) {
                     Button("Start meeting") { model.startMeeting() }.buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(!model.ready || model.isBusy || (model.meetingMode == .online && !model.screenGranted))
                     Button("Cancel", action: onCancel).buttonStyle(CirclesButtonStyle(compact: false))
                 }
             }.padding(32).frame(maxWidth: 844, alignment: .leading)
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in Task { await model.refreshPermissions() } }
+    }
+    private var blocker: (message: String, action: String, perform: () -> Void)? {
+        let settings = { model.meetingSetupPresented = false; model.sidebar = .settings }
+        if !model.micGranted { return ("Microphone isn’t allowed", "Allow", model.grantMic) }
+        if !model.hasKey { return ("Add your \(model.connectionProvider.credentialLabel)", "Settings", settings) }
+        if model.keyStatus == .rejected { return ("\(model.connectionProvider.credentialLabel) not accepted", "Settings", settings) }
+        if !model.consentAccepted { return ("Agree to tell participants before recording", "Settings", settings) }
+        if model.meetingMode == .online && !model.screenGranted {
+            return model.screenRequested ? ("Reopen Transcribe to use Mac audio", "Reopen", model.reopenForPermissions)
+                                         : ("Mac audio isn’t allowed", "Allow", model.grantScreen)
+        }
+        return nil
     }
 }
 
 struct MeetingWorkspaceView: View {
     @EnvironmentObject var model: AppModel
     let record: SessionRecord
-    @State private var tab: ReviewTab = .summary
-    @State private var focusedTurnID: String?
-    @State private var showNotesSnapshot = false
-    enum ReviewTab: String, CaseIterable { case summary = "Summary", notes = "My notes", transcript = "Transcript" }
     private var capturing: Bool { model.activeSessionID == record.id && (model.phase == .starting || model.phase == .recording) }
-    private var notes: Binding<String> { Binding(get: { model.editableNotes(for: record.id) }, set: { model.updateNotes(record.id, $0) }) }
-    private var summary: Binding<String> { Binding(get: { model.editableSummary(for: record.id) }, set: { model.updateSummary(record.id, $0) }) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .top, spacing: 12) {
-                EditableRecordTitle(record: record).id(record.id)
-                Spacer(minLength: 0)
-                StatusPill(title: record.statusLabel, color: capturing ? DesignSystem.error : record.isPartial ? DesignSystem.warning : DesignSystem.muted, background: capturing ? DesignSystem.errorBackground : record.isPartial ? DesignSystem.warningBackground : DesignSystem.subtle)
-            }
-            if capturing {
-                sourceControls
-                if !model.sourceIssue.isEmpty {
-                    HStack { Text(model.sourceIssue).font(DesignSystem.font(13)); Spacer(); if model.macAudioNeedsRetry { Button("Retry Mac audio") { model.retrySystemAudio() }.buttonStyle(.plain).foregroundStyle(DesignSystem.link) } }
-                        .foregroundStyle(DesignSystem.warning).padding(12).background(DesignSystem.warningBackground, in: RoundedRectangle(cornerRadius: 12))
-                }
-                HStack(alignment: .top, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("My notes").font(DesignSystem.font(20, weight: .bold))
-                        EditableTextArea(text: notes, placeholder: "Write what matters…").frame(maxHeight: .infinity).accessibilityLabel("My meeting notes")
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack { Text("Transcript").font(DesignSystem.font(20, weight: .bold)); StatusPill(title: record.liveMeetingVersion == nil ? "Preview" : "Live") }
-                        if record.liveMeetingVersion != nil {
-                            if let notice = model.serviceNotice(for: record) { Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
-                            LiveMeetingTranscriptView(record: record, drafts: sortedDrafts).id(record.id)
-                        } else {
-                            LiveMeetingTranscriptView(record: record, drafts: []).id(record.id)
-                        }
-                    }.frame(width: 360, alignment: .topLeading)
-                }.frame(maxHeight: .infinity)
-            } else {
-                reviewHeader
-                if record.liveMeetingVersion != nil, let notice = model.serviceNotice(for: record) {
-                    HStack(spacing: 12) {
-                        Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning)
-                        Spacer(minLength: 0)
-                        if let action = notice.action {
-                            Button(notice.buttonTitle) { model.performServiceAction(action, for: record.id) }
-                                .buttonStyle(CirclesButtonStyle()).disabled(model.isBusy)
-                        }
-                    }
-                }
-                if record.liveMeetingVersion == nil, !record.issues.isEmpty { RecordIssuesView(record: record) }
-                Picker("Meeting content", selection: $tab) { ForEach(ReviewTab.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 372)
-                switch tab {
-                case .notes: EditableTextArea(text: notes, placeholder: "Your personal notes…").accessibilityLabel("My meeting notes")
-                case .transcript: transcript
-                case .summary: summaryPanel
-                }
-            }
-        }.padding(capturing ? 24 : 32).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(DesignSystem.surface)
-            .onChange(of: record.id) { _ in tab = .summary; focusedTurnID = nil }
-            .sheet(isPresented: $showNotesSnapshot) {
-                VStack(alignment: .leading, spacing: 20) {
-                    HStack { Text("Notes used for this summary").font(DesignSystem.font(20, weight: .bold)); Spacer(); Button("Done") { showNotesSnapshot = false }.buttonStyle(CirclesButtonStyle()) }
-                    ScrollView { Text(record.summaryNotesSnapshot).foregroundStyle(DesignSystem.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                }.padding(24).frame(width: 600, height: 420).font(DesignSystem.font()).background(DesignSystem.surface).preferredColorScheme(model.colorScheme)
-            }
+        Group {
+            if capturing { capture } else { MeetingPage(record: record) }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).background(DesignSystem.surface)
     }
-    private var sortedDrafts: [LiveMeetingDraft] {
-        model.meetingDrafts.values.sorted { $0.source != $1.source ? $0.source < $1.source : $0.itemID < $1.itemID }
+    private var capture: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            EditableRecordTitle(record: record).id(record.id)
+            sourceControls
+            if record.liveMeetingVersion != nil, let notice = model.serviceNotice(for: record) {
+                Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning)
+            }
+            LiveMeetingTranscriptView(record: record, order: model.liveOrder, drafts: model.meetingDrafts)
+                .id(record.id).frame(maxWidth: 760, alignment: .leading)
+        }.padding(24)
     }
     private var sourceControls: some View {
         HStack(spacing: 16) {
@@ -114,104 +80,163 @@ struct MeetingWorkspaceView: View {
     private func source(_ title: String, icon: String, level: Double, health: CaptureHealth?) -> some View {
         HStack(spacing: 8) {
             DesignIcon(name: icon, size: 16)
-            VStack(alignment: .leading, spacing: 2) { Text(title); if let health { Text(healthLabel(health.state)).font(DesignSystem.font(11)) } }.font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                if let word = health.flatMap({ problemWord($0.state) }) { Text(word).font(DesignSystem.font(11)).foregroundStyle(DesignSystem.warning) }
+            }.font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
             InputMeter(level: level)
         }
     }
-    private func healthLabel(_ state: CaptureHealthState) -> String {
-        switch state { case .starting: return "Starting"; case .active: return "Active"; case .silent: return "Quiet"; case .interrupted: return "Interrupted"; case .unavailable: return "Unavailable" }
-    }
-    private var reviewHeader: some View {
-        HStack(spacing: 12) {
-            Text(record.startedAt.formatted(date: .abbreviated, time: .shortened) + " · " + duration(record.duration)).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-            Spacer(minLength: 0)
-            if record.hasText { ConfirmedCopyButton(accessibilityLabel: "Copy meeting transcript") { model.copyTranscript(record.id) }.buttonStyle(CirclesButtonStyle()); Button("Export") { model.export(record.id) }.buttonStyle(CirclesButtonStyle()) }
-            if record.canRecover && !(record.liveMeetingVersion != nil && model.serviceNotice(for: record)?.action == .retryTranscription) { Button("Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle(primary: true)).disabled(model.isBusy) }
-        }
-    }
-    private var summaryPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(record.summaryStatus == .processing ? "Generating notes…" : record.summary.isEmpty ? record.summaryStatus == .failed ? model.notesFailureMessage(record.summaryFailure) : "No summary yet" : "Generated notes").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
-                Spacer()
-                if record.hasText { Button(record.summary.isEmpty ? "Generate notes" : "Regenerate") { model.regenerateNotes(record.id) }.buttonStyle(CirclesButtonStyle()).disabled(record.summaryStatus == .processing || model.isBusy) }
-            }
-            if record.summaryIsStale { Text("New transcript passages are available. Regenerate to include them.").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning) }
-            if !record.summary.isEmpty { EditableTextArea(text: summary).frame(minHeight: 120).accessibilityLabel("Generated meeting notes") }
-            if !record.summaryEvidence.isEmpty {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Sources").font(DesignSystem.font(15, weight: .semibold))
-                        ForEach(record.summaryEvidence, id: \.id) { evidence in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(evidence.text).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.body)
-                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), alignment: .leading)], alignment: .leading, spacing: 8) { ForEach(evidence.turnIDs, id: \.self) { id in
-                                    if id == "notes-0" { Button("My notes") { if record.summaryNotesSnapshot != record.notes { showNotesSnapshot = true } else { tab = .notes } }.buttonStyle(.plain).foregroundStyle(DesignSystem.link) }
-                                    else if let segment = record.segments.first(where: { $0.turnID == id }) { Button(duration(segment.start) + " · " + segment.label) { focusedTurnID = id; tab = .transcript }.buttonStyle(.plain).foregroundStyle(DesignSystem.link) }
-                                } }.font(DesignSystem.font(12))
-                            }
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }.frame(maxHeight: 190)
-            }
-            if record.summary.isEmpty { Spacer() }
-        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-    private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 20) {
-                    if record.segments.isEmpty {
-                        Text(record.transcript.isEmpty ? record.status == .processing ? "Transcribing…" : "No transcript yet" : record.transcript).foregroundStyle(DesignSystem.body).textSelection(.enabled)
-                    } else {
-                        ForEach(record.segments, id: \.turnID) { segment in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(duration(segment.start) + " · " + segment.label).font(DesignSystem.font(13, weight: .semibold)).foregroundStyle(DesignSystem.muted).help(segment.timing == .audioInterval ? "Approximate passage time" : "Passage time")
-                                Text(segment.text).foregroundStyle(DesignSystem.body).textSelection(.enabled)
-                            }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(focusedTurnID == segment.turnID ? DesignSystem.selected : Color.clear, in: RoundedRectangle(cornerRadius: 12)).id(segment.turnID)
-                        }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }.onAppear { if let id = focusedTurnID { proxy.scrollTo(id, anchor: .top) } }
-                .onChange(of: focusedTurnID) { id in if let id { proxy.scrollTo(id, anchor: .top) } }
-        }
+    /// A word appears only when something is wrong. Mac audio is quiet whenever the others are.
+    private func problemWord(_ state: CaptureHealthState) -> String? {
+        switch state { case .interrupted: return "Interrupted"; case .unavailable: return "Unavailable"; default: return nil }
     }
 }
 
-/// Following exists only in the capture pane. Notes and finished review keep
-/// their own ordinary scroll position, including summary-source navigation.
+/// The finished meeting: title, Copy transcript and ⋯, one summary paragraph, a hairline, the transcript.
+private struct MeetingPage: View {
+    @EnvironmentObject var model: AppModel
+    let record: SessionRecord
+    private var notice: AppModel.ServiceNotice? { model.serviceNotice(for: record) }
+    private var noticeRetries: Bool { notice?.action == .retryTranscription }
+    private var transcribing: Bool { record.status == .processing || (model.activeSessionID == record.id && model.isBusy) }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .center, spacing: 12) {
+                    EditableRecordTitle(record: record).id(record.id)
+                    Spacer(minLength: 0)
+                    if record.hasText {
+                        ConfirmedCopyButton(accessibilityLabel: "Copy transcript", title: "Copy transcript") { model.copyTranscript(record.id) }
+                            .buttonStyle(CirclesButtonStyle(primary: true))
+                    }
+                    Menu {
+                        Button("Export…") { model.exportAs(record.id) }.disabled(!record.hasText && record.notes.isEmpty && record.summary.isEmpty)
+                        if record.exportURL.map({ FileManager.default.fileExists(atPath: $0.path) }) == true {
+                            Button("Show in Finder") { model.reveal(record.id) }
+                        }
+                        Divider()
+                        Button("Delete meeting…", role: .destructive) { model.meetingToDelete = record.id }.disabled(!model.canDelete(record.id))
+                    } label: { Text("···").font(DesignSystem.font(15, weight: .semibold)) }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .padding(.horizontal, 14).frame(height: 36)
+                        .overlay(Capsule().strokeBorder(DesignSystem.fieldBorder, lineWidth: 1))
+                        .accessibilityLabel("More")
+                }
+                if !transcribing { problems }
+                if !record.overview.isEmpty {
+                    Text(record.overview).font(DesignSystem.font(15)).foregroundStyle(DesignSystem.body)
+                        .lineSpacing(4).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    Rectangle().fill(DesignSystem.border).frame(height: 1)
+                }
+                transcript
+            }.padding(32).frame(maxWidth: 824, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    @ViewBuilder private var problems: some View {
+        if let notice {
+            HStack(spacing: 12) {
+                Text(notice.message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.warning)
+                Spacer(minLength: 0)
+                if let action = notice.action {
+                    Button(notice.buttonTitle) { model.performServiceAction(action, for: record.id) }
+                        .buttonStyle(CirclesButtonStyle()).disabled(model.isBusy)
+                }
+            }
+        }
+        if record.captureIncomplete {
+            Text("Part of the meeting wasn’t recorded").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+        }
+        if !record.usesLiveTranscription, record.canRecover, !noticeRetries {
+            gapRow("Part of the audio couldn’t be transcribed")
+        }
+    }
+    private func gapRow(_ message: String) -> some View {
+        HStack(spacing: 12) {
+            Text(message).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.body)
+            Spacer(minLength: 0)
+            if !noticeRetries { Button("Retry") { model.retry(record.id) }.buttonStyle(CirclesButtonStyle()).disabled(model.isBusy) }
+        }.padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 10)
+            .background(DesignSystem.page, in: RoundedRectangle(cornerRadius: 12))
+    }
+    /// Captured audio with no transcript, at the time it happened. Close ranges read as one.
+    private var gaps: [(start: Double, end: Double)] {
+        guard record.usesLiveTranscription, !transcribing else { return [] }
+        var merged: [(start: Double, end: Double)] = []
+        for interval in uncoveredMeetingAudio(tracks: record.tracks, turns: record.meetingTurns, includePending: false)
+            .sorted(by: { $0.start < $1.start }) {
+            if let last = merged.last, interval.start <= last.end + 2 { merged[merged.count - 1].end = max(last.end, interval.end) }
+            else { merged.append((interval.start, interval.end)) }
+        }
+        return merged
+    }
+    private enum Row: Identifiable {
+        case paragraph(TranscriptParagraph), gap(Double, Double)
+        var id: String { switch self { case .paragraph(let p): return p.id; case .gap(let s, _): return "gap-\(s)" } }
+        var start: Double { switch self { case .paragraph(let p): return p.start; case .gap(let s, _): return s } }
+    }
+    @ViewBuilder private var transcript: some View {
+        let paragraphs = record.transcriptParagraphs
+        let rows = (paragraphs.map(Row.paragraph) + gaps.map { Row.gap($0.start, $0.end) }).sorted { $0.start < $1.start }
+        if paragraphs.isEmpty && transcribing {
+            Text("Transcribing…").font(DesignSystem.font(15)).foregroundStyle(DesignSystem.muted)
+        } else if paragraphs.isEmpty && record.status == .complete {
+            Text("No speech").font(DesignSystem.font(15)).foregroundStyle(DesignSystem.muted)
+        }
+        LazyVStack(alignment: .leading, spacing: 16) {
+            ForEach(rows) { row in
+                switch row {
+                case .paragraph(let paragraph):
+                    paragraphText(paragraph).font(DesignSystem.font(15)).foregroundStyle(DesignSystem.body)
+                        .lineSpacing(4).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .help(record.segments.isEmpty ? "" : clock(paragraph.start))
+                case .gap(let start, let end):
+                    gapRow(clock(start) + "–" + clock(end) + " couldn’t be transcribed")
+                }
+            }
+        }
+    }
+    private func paragraphText(_ paragraph: TranscriptParagraph) -> Text {
+        guard let speaker = paragraph.speaker else { return Text(paragraph.text) }
+        return Text(speaker).font(DesignSystem.font(15, weight: .semibold)).foregroundColor(DesignSystem.primary) + Text("   " + paragraph.text)
+    }
+}
+
+func clock(_ seconds: Double) -> String {
+    let n = max(0, Int(seconds)); return n >= 3600 ? String(format: "%d:%02d:%02d", n / 3600, n / 60 % 60, n % 60) : String(format: "%02d:%02d", n / 60, n % 60)
+}
+
+/// Each passage keeps the slot where it first appeared: grey while it is being
+/// transcribed, final in the same place. Following exists only in the capture pane.
 private struct LiveMeetingTranscriptView: View {
     let record: SessionRecord
-    let drafts: [LiveMeetingDraft]
+    let order: [AppModel.LiveSlot]
+    let drafts: [String: LiveMeetingDraft]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var follower = LiveTranscriptFollower()
     private let bottomID = "live-transcript-bottom"
-
+    private struct Line: Identifiable { let id: Int; let source: Source; let text: String; let final: Bool }
+    private var lines: [Line] {
+        let confirmed = Dictionary(record.segments.map { ($0.idx, $0) }, uniquingKeysWith: { a, _ in a })
+        return order.enumerated().compactMap { index, slot in
+            if let turn = slot.turnIdx, let segment = confirmed[turn] { return Line(id: index, source: segment.source, text: segment.text, final: true) }
+            if let key = slot.draftKey, let draft = drafts[key], !draft.text.isEmpty { return Line(id: index, source: draft.source, text: draft.text, final: false) }
+            return nil
+        }
+    }
     var body: some View {
+        let lines = self.lines
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if record.liveMeetingVersion == nil {
-                        Text(record.preview.isEmpty ? "Your transcript will appear here." : record.preview)
-                            .foregroundStyle(DesignSystem.muted).textSelection(.enabled)
+                        Text(record.preview).foregroundStyle(DesignSystem.muted).textSelection(.enabled)
                     } else {
-                        ForEach(record.segments, id: \.turnID) { segment in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(duration(segment.start) + " · " + segment.label)
-                                    .font(DesignSystem.font(12, weight: .semibold)).foregroundStyle(DesignSystem.muted)
-                                    .help(segment.timing == .audioInterval ? "Approximate passage time" : "Passage time")
-                                Text(segment.text).textSelection(.enabled)
-                            }
-                        }
-                        ForEach(drafts, id: \.id) { draft in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text((draft.source == .system ? "System audio" : record.meetingMode == .inPerson ? "Microphone" : "You") + " · Draft")
-                                    .font(DesignSystem.font(12, weight: .semibold))
-                                Text(draft.text)
-                            }.foregroundStyle(DesignSystem.muted)
-                        }
-                        if record.segments.isEmpty && drafts.isEmpty {
-                            Text("Your transcript will appear here.").foregroundStyle(DesignSystem.muted)
+                        ForEach(lines) { line in
+                            text(line).foregroundStyle(line.final ? DesignSystem.body : DesignSystem.muted)
+                                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                     Color.clear.frame(height: 1).id(bottomID)
@@ -228,5 +253,10 @@ private struct LiveMeetingTranscriptView: View {
             }
             .onDisappear { follower.stop() }
         }
+    }
+    private func text(_ line: Line) -> Text {
+        guard record.meetingMode == .online else { return Text(line.text) }
+        return Text(line.source == .mic ? "You" : "Others").font(DesignSystem.font(15, weight: .semibold))
+            .foregroundColor(line.final ? DesignSystem.primary : DesignSystem.muted) + Text("   " + line.text)
     }
 }

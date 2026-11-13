@@ -18,6 +18,17 @@ open build/.app-staging.noindex/Transcribe.app
 The app lives in the menu bar. Open Transcribe opens Dictation history. Meetings,
 Dictionary and Settings are available in the sidebar.
 
+### Usability changes in the source checkout
+
+These changes are implemented locally and are not included in the released 2.1.0 download yet.
+
+- Transcribe appears in the Dock and Command–Tab by default. Settings → Show in Dock enables menu-bar-only use when switched off. Closing the window keeps dictation running.
+- Double Option remains available. Settings → Additional shortcut also offers Control–Option–Space (default), Control–Shift–Space, or Off. The selected chord starts and finishes dictation. Fn is unsupported.
+- Setup and Settings share Check dictation. Test shortcut detects your gesture without recording. Then dictate into another app and return to Settings → Check dictation to confirm Text appeared.
+- The floating chip distinguishes Enable Accessibility, Select a text field and Check paste. Hover for the detailed reason. Copy stays available; an unconfirmed paste never retries automatically.
+
+The [installation guide](../docs/INSTALL.md) provides download, Bash and agent instructions. The Bash installer currently installs the signed 2.1.0 release and refuses an existing app in either Applications folder.
+
 ## Connect
 
 Open **Settings → Connection** and choose **OpenAI** to enter your own OpenAI API key. No shared account, team invitation or environment file is required. OpenAI charges your API account for usage. Connection checking verifies access to the dictation model; meeting transcription and summaries also require access to their respective models.
@@ -79,15 +90,21 @@ discarding the saved transcript.
 
 Choose **Online meeting** for microphone plus all audio playing on the Mac, or **In person** for microphone only. Meetings have no five-minute limit. Use a headset for online meetings to reduce acoustic duplication.
 
-Write personal notes beside the live transcript. New meetings use `gpt-live-transcribe`, with separate microphone and Mac-audio connections. Draft words may change while they arrive. Confirmed passages are saved before appearing and stay unchanged, including after you finish recording. The time labels mark captured audio intervals, rather than individual word timestamps. Labels describe audio sources: You / System audio online, Microphone in person. They do not identify individual participants.
+New meetings use `gpt-live-transcribe`, with separate microphone and Mac-audio connections. Each passage keeps the place where it first appeared: grey while it is being transcribed, final in the same place. Your passages end at your pauses (a 2 s minimum), or after 10 s of continuous speech. Confirmed passages are saved before appearing and stay unchanged. Speakers are audio sources: You and Others online, none in person. They do not identify individual participants. If Mac audio stops, it restarts by itself every 5 s and shows Interrupted meanwhile. **Settings → Languages** limits recognition to the languages you choose, starting with your Mac's; without it, short or noisy passages can come back in unrelated languages. With two or more, **New meeting** offers them together or one alone; the choice is kept for the next meeting and can't change once it starts. The microphone is chosen in Settings; New meeting only asks for Mac audio permission when an online meeting needs it.
 
-The live transcript follows new text with short, smooth movements. Scroll up to read earlier passages without being pulled back; return to the bottom to resume following. Reduce Motion disables the animation. Notes and finished transcripts retain their own scroll positions.
+The live transcript follows new text with short, smooth movements. Scroll up to read earlier passages without being pulled back; return to the bottom to resume following. Reduce Motion disables the animation.
 
-If a connection fails, capture continues locally. When you finish, the app transcribes only missing audio intervals with `gpt-transcribe`; it does not rerun or reformat confirmed passages. Retry resumes missing intervals using saved audio and successful cached results. Account problems show a short message with the relevant action. Historical meetings retain their existing transcription and recovery behavior.
+If a connection fails, capture continues locally. When you finish, the app transcribes only missing audio intervals with `gpt-transcribe`; it does not rerun or reformat confirmed passages. Audio that could not be transcribed appears in the transcript at its time with Retry, which resumes from saved audio and cached results. Account problems show a short message with the relevant action.
 
-Generated notes remain separate from the transcript. They use the existing `gpt-4o` summary route and include validated links to transcript turns or the personal-note snapshot. A summary made before missing passages arrive is marked for review and can be regenerated. Unknown action owners remain unassigned. Original notes and edited generated notes are stored separately.
+When a transcript finishes, one `gpt-4o` request writes a 40–80 word paragraph and, unless you typed a title, a title of up to six words. Transcripts under 100 words get a title only. Failures leave the transcript alone. **Copy transcript** copies `You: …` / `Others: …` paragraphs without timestamps; the Markdown export keeps them. Notes from earlier versions stay in their exports and are no longer shown.
 
-Incomplete meetings retain audio for recovery. Complete transcripts are saved before audio cleanup; Keep audio in Settings retains successful raw tracks too. History is in `~/Library/Application Support/Transcribe/Sessions`; meeting Markdown exports use the selected save folder. Import existing Markdown through **Settings → Import recordings…**. Originals remain unchanged and are not imported again after export.
+Drop audio or video files on the window: the left half makes a meeting, the right half a dictation. **File › Open…** and the Dock icon use the open section (Meetings from Dictionary or Settings). A meeting is transcribed in person with the diarized model; a dictation is one plain transcript with your languages and Dictionary, never pasted. Files go one at a time; dictation waits until they finish. WhatsApp and Telegram voice notes (Ogg) are uploaded as they are, up to the 24 MB limit. WebM is not supported.
+
+Incomplete meetings retain audio for recovery. Complete transcripts are saved before audio cleanup; Keep audio in Settings retains successful raw tracks too. History is in `~/Library/Application Support/Transcribe/Sessions`; each meeting is also exported as Markdown to the **Meeting exports** folder in Settings. Dictations are not exported. Import existing Markdown through **File › Import Recordings…**. Originals remain unchanged and are not imported again after export.
+
+## Deleting
+
+Right-click a dictation, or hover it and click **Delete**: it goes at once, with **Undo** in the corner for a few seconds. Delete a meeting from its **⋯** menu or by right-clicking it in the list, after a confirmation. Both move the whole record, audio included, to the macOS Trash, where Finder can put it back. Meeting exports are kept. Nothing can be deleted while it is being recorded or transcribed.
 
 ## Updates
 

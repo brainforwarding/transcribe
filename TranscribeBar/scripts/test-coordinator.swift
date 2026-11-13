@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import TranscribeCore
 import Security
@@ -39,17 +40,18 @@ private final class ProviderProbeProtocol: URLProtocol {
 /// Standalone CLT runner. Every command under test is the actual AppModel command.
 @MainActor
 private final class Gate {
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var released = false
     private(set) var entered = false
     func wait() async {
         entered = true
         if released { return }
-        await withCheckedContinuation { continuation = $0 }
+        await withCheckedContinuation { continuations.append($0) }
     }
     func release() {
         released = true
-        continuation?.resume(); continuation = nil
+        let waiting = continuations; continuations = []
+        for continuation in waiting { continuation.resume() }
     }
 }
 
@@ -84,6 +86,7 @@ private final class Fixture {
     var cancellationSaveFails = false
     var transcriptionFailure: ServiceFailureKind? = nil
     var finalText = "Saved speech"
+    var trashFails = false
     var finalComplete = true
     var blocksDelivery = false
     var currentFocus = "Field A"
@@ -118,6 +121,9 @@ private final class Fixture {
     var levelCallback: (@Sendable (Source, Double) -> Void)?
     var healthCallback: (@Sendable (CaptureHealth) -> Void)?
     var captureHasAudio = true
+    var overviewResult: MeetingOverview? = MeetingOverview(title: "Generated title", summary: "Generated summary paragraph.")
+    var describedTexts: [String] = []
+    let describing = Gate()
     var captureStartFails = false
 
     init(legacyCredential: CredentialSession.ReadResult = .missing, storedProvider: ConnectionProvider? = nil,
@@ -158,7 +164,7 @@ private final class Fixture {
             }, stop: { [self] in
                 stops += 1
                 return AppModel.CaptureSession.Output(tracks: tracks, issues: [])
-            }, retrySystemAudio: {})
+            })
         }, transcribe: { [self] _, _, config in
             seenConfig = config
             transcriptionRequests += 1; await processing.wait()
@@ -192,12 +198,25 @@ private final class Fixture {
             return automatic ? automaticOutcome : manualOutcome
         },
         copy: { [self] _ in copies += 1; return copyResult }, automaticTimer: false)
+        // Never the real Trash: a folder inside the fixture, or a failure on request.
+        let bin = folder.appendingPathComponent("Bin", isDirectory: true)
+        operations.trash = { [self] url in
+            if trashFails { throw CocoaError(.fileWriteNoPermission) }
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            let target = bin.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: target); return target
+        }
         if liveMeetingEnabled {
             operations.makeLiveMeeting = { [self] record, _, config, persist, draft, issue in
                 seenConfig = config
                 liveMode = record.dictationPerformance?.mode
                 livePersist = persist; liveDraft = draft; liveIssue = issue
                 return AppModel.MeetingSession(start: {}, offer: { _ in }, finish: { [] }, cancel: { [] })
+            }
+            operations.describeMeeting = { [self] text, _ in
+                describedTexts.append(text); await describing.wait()
+                guard let overviewResult else { throw ProviderError.unavailable }
+                return overviewResult
             }
             operations.recoverMeeting = { [self] record, _, _, persist in
                 liveRecoveries += 1; recoveredInput = record.meetingTurns
@@ -215,7 +234,7 @@ private final class Fixture {
         model.micGranted = true; model.acceptConsent()
     }
     func close() async {
-        startup.release(); processing.release(); delivery.release()
+        startup.release(); processing.release(); delivery.release(); describing.release()
         await model?.prepareToQuit()
         model = nil; verificationSession.invalidateAndCancel()
         preferences.removePersistentDomain(forName: preferenceDomain)
@@ -251,6 +270,32 @@ private final class Fixture {
 struct CoordinatorSelftest {
     @MainActor static func main() async {
         let cases: [(String, @MainActor (Fixture) async throws -> Void)] = [
+            ("Dictation usability defaults, confirmation and dry-run state survive view replacement", { f in
+                try check(f.model.showInDock && f.model.additionalShortcut == .controlOptionSpace && !f.model.dictationChecked,
+                          "New defaults enable Dock and a conventional additional shortcut")
+                f.model.accessibilityGranted = true; f.model.shortcutAvailable = true
+                var testModes: [Bool] = []
+                f.model.shortcutTestChanged = { testModes.append($0) }
+                f.model.beginShortcutCheck()
+                try check(f.model.shortcutCheck == .listening && f.starts == 0 && f.manualPastes == 0, "Shortcut check is a dry run")
+                f.model.finishShortcutCheck(detected: true)
+                try check(f.model.shortcutCheck == .detected && testModes.last == false, "Detection disarms test")
+                f.model.dictationChecked = true; f.model.showInDock = false
+                let reloaded = AppModel(store: f.store, operations: nil, preferences: f.preferences, initializeSystemState: false)
+                try check(reloaded.dictationChecked && !reloaded.showInDock, "Explicit confirmation and Dock preference persist")
+                f.model.beginShortcutCheck(); f.model.additionalShortcut = .controlShiftSpace
+                try check(f.model.shortcutCheck == .idle && !f.model.dictationChecked && testModes.last == false,
+                          "Changing shortcut cancels test and resets manual confirmation")
+                f.model.beginShortcutCheck(); f.model.finishShortcutCheck(detected: false)
+                try check(f.model.shortcutCheck == .timedOut && f.starts == 0, "Timeout explains failure without recording")
+                f.model.beginShortcutCheck(); f.model.cancelShortcutCheck()
+                try check(f.model.shortcutCheck == .idle, "Navigation can cancel model-owned test")
+                f.model.beginShortcutCheck()
+                try check(f.model.acquireUpdateLock() && f.model.shortcutCheck == .idle, "Update acceptance cancels a dry run")
+                f.model.releaseUpdateLock()
+                f.model.beginShortcutCheck(); f.model.startDictation()
+                try check(f.model.shortcutCheck == .idle && testModes.last == false, "Capture cancels a dry run before startup")
+            }),
             ("Missing microphone remains visible without transcription or futile retry", { f in
                 f.captureHasAudio = false; f.captureStartFails = true
                 f.model.startDictation()
@@ -294,6 +339,231 @@ struct CoordinatorSelftest {
                 let revision = saved.transcriptRevision
                 f.model.retry(saved.id)
                 try check(f.model.activeRecord?.transcriptRevision == revision, "Completed live retry never rewrites confirmed words")
+                await f.close()
+            }),
+            ("Live passages keep the slot where they first appeared", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.meetingMode = .online; f.model.screenGranted = true; f.model.startMeeting(); f.startup.release()
+                try await until("live meeting recording") { f.model.phase == .recording }
+                guard let persist = f.livePersist, let draft = f.liveDraft else { throw CheckFailure(description: "Missing live hooks") }
+                draft(LiveMeetingDraft(source: .mic, itemID: "a", text: "first"))
+                draft(LiveMeetingDraft(source: .system, itemID: "b", text: "second"))
+                try await until("two draft slots") { f.model.liveOrder.count == 2 }
+                draft(LiveMeetingDraft(source: .system, itemID: "b", text: "second", turnIdx: 1_000_000_000))
+                draft(LiveMeetingDraft(source: .mic, itemID: "a", text: "first", turnIdx: 0))
+                try await until("turns mapped") { f.model.liveOrder.allSatisfy { $0.turnIdx != nil } }
+                let b = MeetingTurn(idx: 1_000_000_000, source: .system, start: 0, end: 1, state: .confirmed, text: "second")
+                var a = MeetingTurn(idx: 0, source: .mic, start: 0.5, end: 2, state: .pending)
+                try await persist([a, b])
+                draft(LiveMeetingDraft(source: .system, itemID: "b", text: "", turnIdx: 1_000_000_000))
+                a.state = .confirmed; a.text = "first"
+                try await persist([a, b])
+                draft(LiveMeetingDraft(source: .mic, itemID: "a", text: "", turnIdx: 0))
+                try check(f.model.liveOrder.map(\.turnIdx) == [0, 1_000_000_000], "Confirmation in another order keeps first-seen order")
+                let c = MeetingTurn(idx: 1, source: .mic, start: 3, end: 4, state: .confirmed, text: "no draft")
+                try await persist([a, b, c])
+                try check(f.model.liveOrder.map(\.turnIdx) == [0, 1_000_000_000, 1], "A confirmation with no draft is appended")
+                draft(LiveMeetingDraft(source: .mic, itemID: "d", text: "lost", turnIdx: 2))
+                try await until("third slot") { f.model.liveOrder.count == 4 }
+                let d = MeetingTurn(idx: 2, source: .mic, start: 5, end: 6, state: .needsRecovery)
+                try await persist([a, b, c, d])
+                draft(LiveMeetingDraft(source: .mic, itemID: "d", text: "", turnIdx: 2))
+                try await until("draft cleared") { f.model.meetingDrafts["0-d"] == nil }
+                try check(f.model.liveOrder.count == 4 && f.model.activeRecord?.segments.contains { $0.idx == 2 } == false,
+                          "A turn that needs recovery keeps an empty, invisible slot")
+                f.model.finishRecording(); try await until("finalized") { f.model.phase == .done }
+                await f.close()
+            }),
+            ("Language hints start from the Mac's languages and carry over an old choice", { _ in
+                let supported = AppModel.supportedLanguages.map(\.id)
+                let suite = "transcribe-languages-\(UUID().uuidString)"
+                let p = UserDefaults(suiteName: suite)!; defer { p.removePersistentDomain(forName: suite) }
+                try check(AppModel.initialLanguages(p, supported: supported, preferred: ["en-CL", "es-CL"]) == ["en", "es"], "Mac languages")
+                try check(AppModel.initialLanguages(p, supported: supported, preferred: ["ja-JP"]).isEmpty, "unsupported Mac language means any")
+                p.set("auto", forKey: "languageID")
+                try check(AppModel.initialLanguages(p, supported: supported, preferred: ["es"]) == ["es"], "Automatic moves to Mac languages")
+                p.set("pt", forKey: "languageID")
+                try check(AppModel.initialLanguages(p, supported: supported, preferred: ["es"]) == ["pt"], "old single choice kept")
+                p.set([String](), forKey: "languageIDs")
+                try check(AppModel.initialLanguages(p, supported: supported, preferred: ["es"]).isEmpty, "a cleared list stays cleared")
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.languageIDs = ["es"]; f.model.toggleLanguage("en"); f.model.toggleLanguage("pt"); f.model.toggleLanguage("pt")
+                try check(f.model.languageIDs == ["en", "es"] && f.model.languageSummary == "English, Spanish", "toggles keep list order")
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("recording") { f.model.phase == .recording }
+                try check(f.model.activeRecord?.languages == ["en", "es"], "new records carry the hints")
+                f.model.finishRecording(); try await until("finalized") { f.model.phase == .done }
+                await f.close()
+            }),
+            ("Meeting summary and title follow the transcript and never replace a typed title", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                let words = Array(repeating: "word", count: 120).joined(separator: " ")
+                @MainActor func run(title: String, text: String) async throws -> SessionRecord {
+                    f.model.meetingTitle = title; f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                    try await until("recording") { f.model.phase == .recording }
+                    try await f.livePersist!([MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: text)])
+                    f.model.finishRecording(); try await until("finalized") { f.model.phase == .done }
+                    try await until("summary") { f.model.summaryTaskCount == 0 }
+                    return f.model.records.first { $0.id == f.model.activeSessionID }!
+                }
+                f.describing.release()
+                var record = try await run(title: "", text: words)
+                try check(record.title == "Generated title" && record.overview == "Generated summary paragraph." && !record.isPartial,
+                          "A blank setup title is replaced and the paragraph stored")
+                try check(f.describedTexts.last?.hasPrefix(words) == true && f.describedTexts.last?.contains("You:") == false, "One source sends the plain transcript without names")
+                try check((try? String(contentsOf: record.exportURL!)).map { $0.contains("Generated summary paragraph.") } == true,
+                          "Export is rewritten with the summary under the title")
+                record = try await run(title: "Board", text: words)
+                try check(record.title == "Board" && record.overview == "Generated summary paragraph.", "A typed title is kept")
+                record = try await run(title: "", text: "Too short to summarise")
+                try check(record.title == "Generated title" && record.overview.isEmpty, "Short transcripts get a title but no summary")
+                f.overviewResult = nil
+                record = try await run(title: "", text: words)
+                try check(record.title == "Meeting" && record.overview.isEmpty && record.status == .complete, "A failure leaves the record complete")
+                await f.close()
+            }),
+            ("A pending title edit or a changed transcript discards the generated result", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                let words = Array(repeating: "word", count: 120).joined(separator: " ")
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("recording") { f.model.phase == .recording }
+                try await f.livePersist!([MeetingTurn(idx: 0, source: .mic, start: 0, end: 1, state: .confirmed, text: words)])
+                f.model.finishRecording(); try await until("finalized") { f.model.phase == .done }
+                try await until("request") { f.describing.entered }
+                let id = f.model.activeSessionID!
+                f.model.stageTitle(id, "Typing")
+                f.describing.release(); try await until("summary") { f.model.summaryTaskCount == 0 }
+                let record = f.model.records.first { $0.id == id }!
+                try check(record.title == "Meeting" && record.overview == "Generated summary paragraph.", "A pending edit blocks the title only")
+                try check(f.model.commitPendingEdits() && f.model.records.first { $0.id == id }?.titleIsAutomatic == false,
+                          "Committing an edit makes the title the user's")
+                await f.close()
+            }),
+            ("Dropped files wait for a capture and then transcribe one at a time", { f in
+                @MainActor func eventually(_ message: String, _ condition: () -> Bool) async throws {
+                    for _ in 0..<500 { if condition() { return }; try await Task.sleep(nanoseconds: 10_000_000) }
+                    throw CheckFailure(description: "Timed out: " + message)
+                }
+                let wav = f.folder.appendingPathComponent("Voice note.wav")
+                let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+                let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44_100)!
+                buffer.frameLength = 44_100
+                for i in 0..<44_100 { buffer.floatChannelData![0][i] = 0.2 * sin(Float(i) * 0.05) }
+                try AVAudioFile(forWriting: wav, settings: format.settings).write(from: buffer)
+                let garbage = f.folder.appendingPathComponent("broken.m4a")
+                try Data("not audio".utf8).write(to: garbage)
+                try await f.beginRecording()
+                f.model.importAudioFiles([wav, garbage, wav])
+                try await eventually("admitted") { !f.model.importInProgress && f.model.records.filter { $0.kind == .meeting }.count == 2 }
+                try check(f.model.statusDetail == "Can’t import “broken.m4a”." && f.transcriptionRequests == 0,
+                          "A bad file leaves only a notice and files wait for the capture")
+                let files = f.model.records.filter { $0.kind == .meeting }
+                try check(files.allSatisfy { $0.status == .processing && $0.meetingMode == .inPerson && $0.title == "Voice note" && $0.titleIsAutomatic },
+                          "Files are in-person meeting records named after the file")
+                f.processing.release(); f.model.finishRecording()
+                try await eventually("all transcribed") {
+                    f.transcriptionRequests == 3 && f.model.phase == .done && f.model.records.filter { $0.kind == .meeting }.allSatisfy { $0.status == .complete }
+                }
+                let loaded = try f.store.load(); try check(loaded.count == 3, "No temporary folder is loaded as a record")
+            }),
+            ("Deleting a dictation moves it to the Trash and Undo brings it back", { f in
+                try await f.beginProcessing(); f.processing.release()
+                try await until("done") { f.model.phase == .done && f.model.records.first?.status == .complete }
+                let id = f.model.records[0].id
+                let folder = f.store.directory(for: id)
+                try check(f.model.canDelete(id), "A finished dictation can be deleted")
+                f.model.delete(id)
+                try check(f.model.records.isEmpty && !FileManager.default.fileExists(atPath: folder.path)
+                          && f.model.statusDetail == "Dictation deleted" && f.model.lastDeleted?.id == id, "Gone from history and the store, with Undo")
+                f.model.undoDelete()
+                try check(f.model.records.first?.id == id && f.model.records[0].transcript == f.finalText
+                          && FileManager.default.fileExists(atPath: folder.path) && f.model.lastDeleted == nil && f.model.statusDetail.isEmpty,
+                          "Undo restores the record and its folder")
+                f.trashFails = true; f.model.delete(id)
+                try check(f.model.records.count == 1 && f.model.statusDetail == "Couldn’t move to the Trash.", "A failed move keeps the record")
+                f.trashFails = false
+                f.model.chipRecordID = id; f.model.stageTitle(id, "Unsaved title")
+                f.model.delete(id)
+                try check(f.model.chipRecordID == nil && !f.model.chipVisible && f.model.commitPendingEdits(),
+                          "No chip or pending edit keeps pointing at a deleted record")
+                f.model.statusDetail = "Something else"
+                try check(f.model.lastDeleted == nil, "Another notice drops Undo")
+                f.model.statusDetail = ""
+                f.model.undoDelete()
+                try check(f.model.records.isEmpty, "Undo without its notice does nothing")
+                try FileManager.default.removeItem(at: f.folder.appendingPathComponent("Bin"))
+                try await f.beginProcessing(); f.processing.release()
+                try await until("second done") { f.model.phase == .done && f.model.records.first?.status == .complete }
+                let second = f.model.records[0].id
+                f.model.delete(second)
+                try FileManager.default.removeItem(at: f.folder.appendingPathComponent("Bin"))
+                f.model.undoDelete()
+                try check(f.model.records.isEmpty && f.model.statusDetail == "Couldn’t restore from the Trash.", "An emptied Trash says so")
+                try await f.beginRecording()
+                let active = f.model.activeSessionID!
+                try check(!f.model.canDelete(active), "The recording in progress can't be deleted")
+                f.model.delete(active)
+                try check(f.model.records.contains { $0.id == active }, "Delete is refused while recording")
+            }),
+            ("Deleting a meeting selects its neighbour and stops its summary", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.overviewResult = MeetingOverview(title: "Late title", summary: "Late summary")
+                var ids: [UUID] = []
+                for title in ["First", "Second", "Third"] {
+                    f.model.meetingTitle = title; f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                    try await until("recording \(title)") { f.model.phase == .recording }
+                    try await f.livePersist?([.init(idx: 0, source: .mic, start: 0, end: 2, state: .confirmed, text: "Words for \(title)")])
+                    f.model.finishRecording(); try await until("finalized \(title)") { f.model.phase == .done }
+                    ids.append(f.model.records[0].id)
+                }
+                f.model.sidebar = .meetings
+                let visible = f.model.filteredRecords.map(\.id)
+                f.model.selectedRecordID = visible[1]
+                f.model.delete(visible[1])
+                try check(f.model.selectedRecordID == visible[2] && f.model.lastDeleted == nil, "The next meeting is selected, no Undo")
+                f.model.delete(visible[2])
+                try check(f.model.selectedRecordID == visible[0], "The previous one when it was last")
+                f.describing.release()
+                try await Task.sleep(nanoseconds: 100_000_000)
+                try check(!f.model.records.contains { $0.title == "Late title" } && f.model.records.count == 1, "No summary is written after a delete")
+                await f.close()
+            }),
+            ("A file dropped on Dictation is transcribed once and never pasted", { f in
+                @MainActor func eventually(_ message: String, _ condition: () -> Bool) async throws {
+                    for _ in 0..<500 { if condition() { return }; try await Task.sleep(nanoseconds: 10_000_000) }
+                    throw CheckFailure(description: "Timed out: " + message)
+                }
+                let wav = f.folder.appendingPathComponent("Nota.wav")
+                let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+                let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000)!
+                buffer.frameLength = 16_000
+                for i in 0..<16_000 { buffer.floatChannelData![0][i] = 0.2 * sin(Float(i) * 0.05) }
+                try AVAudioFile(forWriting: wav, settings: format.settings).write(from: buffer)
+                f.model.languageIDs = ["en", "es"]; f.model.meetingLanguage = "es"
+                f.model.importAudioFiles([wav], as: .dictation)
+                try await eventually("admitted") { f.model.records.contains { $0.kind == .dictation && $0.importedFrom == "Nota.wav" } }
+                let admitted = f.model.records.first { $0.importedFrom == "Nota.wav" }!
+                try check(f.model.sidebar == .dictation && admitted.delivery == .never && admitted.languages == ["en", "es"],
+                          "Dictation files use the Settings languages and open Dictation")
+                f.processing.release()
+                try await eventually("transcribed") { f.model.records.first { $0.id == admitted.id }?.status == .complete && f.model.phase == .done }
+                try check(f.transcriptionRequests == 1 && f.insertions == 0 && f.model.records.first { $0.id == admitted.id }?.hasText == true,
+                          "One transcription, no paste")
+            }),
+            ("Meeting language offers the Settings languages together, then each alone", { _ in
+                let f = try Fixture(liveMeetingEnabled: true)
+                f.model.languageIDs = ["en", "es"]
+                try check(f.model.meetingLanguageOptions.map(\.name) == ["English & Spanish", "English", "Spanish"], "options")
+                try check(f.model.meetingLanguages == ["en", "es"], "both by default")
+                f.model.meetingLanguage = "es"
+                f.model.meetingMode = .inPerson; f.model.startMeeting(); f.startup.release()
+                try await until("recording") { f.model.phase == .recording }
+                try check(f.model.activeRecord?.languages == ["es"], "a meeting can be pinned to one language")
+                f.model.finishRecording(); try await until("finalized") { f.model.phase == .done }
+                f.model.languageIDs = ["en"]
+                try check(f.model.meetingLanguageOptions.isEmpty && f.model.meetingLanguages == ["en"], "one language: no menu")
+                f.model.languageIDs = ["en", "pt"]
+                try check(f.model.meetingLanguages == ["en", "pt"], "a removed language falls back to all")
                 await f.close()
             }),
             ("Continuous dictation is the only mode and ignores retired preferences", { _ in
@@ -681,10 +951,12 @@ struct CoordinatorSelftest {
             }),
             ("Unavailable automatic destination retains its reason after durable text", { f in
                 let reason = "Enable Accessibility to insert text."
-                f.automaticOutcome = .ready(reason: reason)
+                f.automaticOutcome = .ready(reason: reason, feedback: .permission)
                 try await f.beginProcessing(); f.processing.release()
                 try await until("unavailable destination completion") { f.model.phase == .done }
                 let saved = try f.store.load().first
+                try check(f.model.pasteFeedback == .permission && f.model.readyChipLabel == "Enable Accessibility",
+                          "Typed automatic permission feedback reaches compact chip")
                 try check(f.insertions == 1 && f.insertedAfterDurableText && f.copies == 0,
                           "Captured delivery failure must resolve once after durable text without copying")
                 try check(saved?.status == .complete && saved?.delivery == .ready && saved?.issues == [reason],
@@ -699,6 +971,7 @@ struct CoordinatorSelftest {
                 try await f.beginProcessing(); f.processing.release()
                 try await until("unconfirmed automatic completion") { f.model.phase == .done }
                 let saved = try f.store.load().first
+                try check(f.model.pasteFeedback == .unconfirmed && f.model.readyChipLabel == "Check paste", "Unconfirmed write uses Check paste")
                 try check(f.insertions == 1 && f.insertedAfterDurableText && f.copies == 0,
                           "An unconfirmed write must not automatically copy or retry")
                 try check(saved?.transcript == "Saved speech" && saved?.delivery == .ready &&
@@ -707,9 +980,11 @@ struct CoordinatorSelftest {
             }),
             ("Unavailable manual paste preserves clipboard and saves its reason", { f in
                 let reason = "Select an editable field."
-                let id = try f.addHistoricalRecord(); f.manualOutcome = .ready(reason: reason)
+                let id = try f.addHistoricalRecord(); f.manualOutcome = .ready(reason: reason, feedback: .field)
                 try await f.pasteLast()
                 let saved = try f.store.load().first { $0.id == id }
+                try check(f.model.pasteFeedback == .field && f.model.chipTranscriptRecord?.id == id,
+                          "Manual field feedback and Copy refer to the delivered record")
                 try check(f.manualPastes == 1 && f.copies == 0 && f.insertions == 0,
                           "A manual command with no write must leave the existing clipboard untouched")
                 try check(saved?.issues == [reason] && f.model.deliveryDetail == reason && f.model.statusDetail.isEmpty,

@@ -115,21 +115,80 @@ private final class LiveFixtureState: @unchecked Sendable {
     private var reject = false
     var turns: [MeetingTurn] { lock.withLock { saved } }
     var draftText: String { lock.withLock { drafts.last?.text ?? "" } }
+    var allDrafts: [LiveMeetingDraft] { lock.withLock { drafts } }
     func failSaves() { lock.withLock { reject = true } }
     func persist(_ turns: [MeetingTurn]) throws { try lock.withLock { if reject { throw ProviderError.cacheWrite }; saved = turns } }
     func draft(_ value: LiveMeetingDraft) { lock.withLock { drafts.append(value) } }
 }
-private func liveFrame(_ source: Source = .mic, offset: Double, duration: Double = 0.4, signal: Bool = true) -> CapturedAudioFrame {
-    let samples = [Float](repeating: signal ? 0.2 : 0, count: Int((duration * 16_000).rounded()))
-    return samples.withUnsafeBytes { .init(source: source, offset: offset, pcmFloat32: Data($0), rms: signal ? 0.2 : 0) }
+private func liveFrame(_ source: Source = .mic, offset: Double, duration: Double = 0.4, signal: Bool = true, rms: Double? = nil) -> CapturedAudioFrame {
+    let level = rms ?? (signal ? 0.2 : 0)
+    let samples = [Float](repeating: Float(level), count: Int((duration * 16_000).rounded()))
+    return samples.withUnsafeBytes { .init(source: source, offset: offset, pcmFloat32: Data($0), rms: level) }
 }
+/// Steady 16 kHz signal through a capture writer in `chunk`-frame buffers, with sub-millisecond
+/// host-clock jitter like real devices, and optionally one 0.2 s clock gap.
+private func writerFrames(_ root: URL, seconds: Double, chunk: Int, gapAt: Double? = nil) throws -> ([AudioSpan], [CapturedAudioFrame]) {
+    let writer = PCMTrackWriter(directory: root, source: .mic, epoch: 1_000)
+    var frames: [CapturedAudioFrame] = []
+    writer.onAudioFrame = { frames.append($0) }
+    let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(chunk))!
+    buffer.frameLength = AVAudioFrameCount(chunk); buffer.floatChannelData![0].initialize(repeating: 0.2, count: chunk)
+    var position = 0, n = 0
+    while Double(position) / 16_000 < seconds {
+        let time = Double(position) / 16_000 + (gapAt.map { Double(position) / 16_000 >= $0 ? 0.2 : 0 } ?? 0)
+        try writer.append(buffer, pts: 1_000 + time + 0.0008 * sin(Double(n) * 1.7))
+        position += chunk; n += 1
+    }
+    return (writer.stop(), frames)
+}
+/// Offers frames no faster than the engine uploads them, so the bounded live queue never overflows.
+private func feedPaced(_ controller: LiveMeetingController, socket: LiveFixtureSocket, _ frames: [CapturedAudioFrame]) async throws {
+    let base = socket.appends
+    for (i, frame) in frames.enumerated() {
+        controller.offer(frame)
+        try await liveUntil("paced frame uploaded") { socket.appends >= base + i }
+    }
+}
+private func liveController(_ socket: LiveFixtureSocket, state: LiveFixtureState, continuous: Bool = false) -> LiveMeetingController {
+    .init(realtimeURL: URL(string: "wss://live-fixture.invalid/v1/realtime?intent=transcription")!,
+        config: .init(baseURL: URL(string: "https://fixture.invalid/v1")!, authValue: "Bearer local-fixture"), sources: [.mic],
+        onPersist: { try state.persist($0) }, onDraft: { state.draft($0) }, socketFactory: { _ in socket },
+        finishTimeout: 0.1, continuousDictation: continuous)
+}
+private final class RecoveryFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0, inFlight = 0, overlap = false, shown: [CaptureHealth] = []
+    private var buffersAt = Int.max
+    var recovery: SystemAudioRecovery!
+    var attempts: Int { lock.withLock { count } }
+    var overlapped: Bool { lock.withLock { overlap } }
+    var health: [CaptureHealth] { lock.withLock { shown } }
+    init(interval: TimeInterval, attemptSeconds: Double = 0) {
+        recovery = SystemAudioRecovery(interval: interval) { [unowned self] in
+            let number = self.lock.withLock { () -> Int in count += 1; inFlight += 1; overlap = overlap || inFlight > 1; return count }
+            // Each restart reports Starting, as SystemAudioCapture.start does.
+            self.report(.init(source: .system, state: .starting))
+            if attemptSeconds > 0 { try? await Task.sleep(nanoseconds: UInt64(attemptSeconds * 1_000_000_000)) }
+            if number >= self.lock.withLock({ buffersAt }) { self.report(.init(source: .system, state: .active)) }
+            self.lock.withLock { inFlight -= 1 }
+        }
+    }
+    func buffersArrive(fromAttempt number: Int) { lock.withLock { buffersAt = number } }
+    func report(_ health: CaptureHealth) { if let shown = recovery.filter(health) { lock.withLock { self.shown.append(shown) } } }
+    func down(_ state: CaptureHealthState = .interrupted) {
+        report(.init(source: .system, state: state, message: "Mac audio stopped. Your microphone is still recording.")); recovery.begin()
+    }
+}
+/// One two-second turn (the pause floor): 0.4 s of speech, then quiet until the pause ends it.
 private func feedTurn(_ controller: LiveMeetingController, socket: LiveFixtureSocket, source: Source = .mic, start: Double) async throws {
     let appends = socket.appends
     controller.offer(liveFrame(source, offset: start))
     try await liveUntil("first live frame") { socket.appends > appends }
-    controller.offer(liveFrame(source, offset: start + 0.4, signal: false))
-    try await liveUntil("second live frame") { socket.appends > appends + 1 }
-    controller.offer(liveFrame(source, offset: start + 0.8, signal: false))
+    for i in 1..<5 {
+        controller.offer(liveFrame(source, offset: start + Double(i) * 0.4, signal: false))
+        try await liveUntil("quiet live frame") { socket.appends > appends + i }
+    }
 }
 private func controller(_ socket: LiveFixtureSocket, state: LiveFixtureState) -> LiveMeetingController {
     .init(realtimeURL: URL(string: "wss://live-fixture.invalid/v1/realtime?intent=transcription")!,
@@ -323,7 +382,7 @@ public func runLiveMeetingSelftests() async -> Bool {
             let started = ProcessInfo.processInfo.systemUptime
             let turns = await live.finish()
             try liveCheck(ProcessInfo.processInfo.systemUptime - started < 2 && socket.isClosed &&
-                          turns.first?.state == .needsRecovery && abs((turns.first?.end ?? 0) - 1.2) < 0.0001,
+                          turns.first?.state == .needsRecovery && abs((turns.first?.end ?? 0) - 2) < 0.0001,
                           "a delayed completion cannot stall dictation or discard its audio interval")
         }),
         ("canonical PCM and live configuration", {
@@ -386,7 +445,7 @@ public func runLiveMeetingSelftests() async -> Bool {
             socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "item-A", "delta": "Draft"])
             try await liveUntil("draft before ACK") { state.draftText == "Draft" }
             socket.push(["type": "input_audio_buffer.committed", "item_id": "item-A", "previous_item_id": NSNull()])
-            try await feedTurn(live, socket: socket, start: 1.2)
+            try await feedTurn(live, socket: socket, start: 2)
             try await liveUntil("second committed interval") { socket.commits == 2 }
             socket.push(["type": "input_audio_buffer.committed", "item_id": "item-B", "previous_item_id": "item-A"])
             socket.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "item-B", "transcript": "Later"])
@@ -402,7 +461,7 @@ public func runLiveMeetingSelftests() async -> Bool {
                 if let audio = request["audio"] as? String { frames += Data(base64Encoded: audio)!.count / 2 }
                 if request["type"] as? String == "input_audio_buffer.commit" { counts.append(frames); frames = 0 }
             }
-            try liveCheck(counts.count == 2 && counts.allSatisfy({ abs($0 - 28_800) <= 2 }),
+            try liveCheck(counts.count == 2 && counts.allSatisfy({ abs($0 - 48_000) <= 2 }),
                           "each committed interval contains its own complete converter tail " + counts.map(String.init).joined(separator: ","))
         }),
         ("slow system configuration cannot stall healthy microphone", {
@@ -520,7 +579,7 @@ public func runLiveMeetingSelftests() async -> Bool {
             first.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "first", "transcript": "Permanent"])
             try await liveUntil("first generation confirmed") { state.turns.first?.state == .confirmed }
             first.setAudioFailure(after: first.appends + 1)
-            live.offer(liveFrame(offset: 1.2))
+            live.offer(liveFrame(offset: 2))
             try await liveUntil("partial append fails") { first.isClosed }
             first.push(["type": "input_audio_buffer.committed", "item_id": "stale", "previous_item_id": "first"])
             first.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "stale", "transcript": "Must not survive"])
@@ -545,15 +604,144 @@ public func runLiveMeetingSelftests() async -> Bool {
             first.push(["type": "input_audio_buffer.committed", "item_id": "before-expiry", "previous_item_id": NSNull()])
             first.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "before-expiry", "transcript": "Before expiry"])
             try await liveUntil("expiry fixture confirmation") { state.turns.first?.state == .confirmed }
-            live.offer(liveFrame(offset: 1.2)); try await liveUntil("uncommitted audio before expiry") { first.appends > 7 }
+            let committedAppends = first.appends
+            live.offer(liveFrame(offset: 2)); try await liveUntil("uncommitted audio before expiry") { first.appends > committedAppends }
             first.push(["type": "session.created", "session": ["type": "transcription", "expires_at": Date().timeIntervalSince1970 + 10]])
             // Queue order ensures the advertised deadline is processed before the next real frame.
             try await Task.sleep(nanoseconds: 10_000_000)
-            live.offer(liveFrame(offset: 1.6)); try await liveUntil("expiry rotation") { sequence.calls == 2 && first.isClosed }
+            live.offer(liveFrame(offset: 2.4)); try await liveUntil("expiry rotation") { sequence.calls == 2 && first.isClosed }
             let result = await live.cancel()
             try liveCheck(result[0].text == "Before expiry" && result[0].state == .confirmed &&
-                          result.contains { $0.start == 1.2 && $0.end == 1.6 && $0.state == .needsRecovery },
+                          result.contains { $0.start == 2 && $0.end == 2.4 && $0.state == .needsRecovery },
                           "expiry preserves confirmed identity and old generation open range")
+        }),
+        ("turn runs across a 45 s capture rotation", {
+            for chunk in [1_600, 1_024] { // rotation at a buffer's end, and inside one
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let (spans, frames) = try writerFrames(root, seconds: 47, chunk: chunk)
+                try liveCheck(spans.count == 2 && spans[0].duration == 45 && abs(spans[1].offset - (spans[0].offset + spans[0].duration)) < 1e-9,
+                              "a full part continues at the previous offset plus its duration (\(chunk))")
+                try liveCheck(zip(frames, frames.dropFirst()).allSatisfy { abs($1.offset - ($0.offset + $0.duration)) <= 1 / 8_000 },
+                              "frame offsets stay on the span timeline across the rotation (\(chunk))")
+                try validateCapturedMeetingInterval(track: .init(source: .mic, spans: spans), start: 44, end: 46)
+                let socket = LiveFixtureSocket(), state = LiveFixtureState(), live = liveController(socket, state: state)
+                await live.start()
+                try await feedPaced(live, socket: socket, frames.filter { $0.offset >= 43.6 && $0.offset < 46.4 })
+                let turns = await live.finish()
+                try liveCheck(socket.commits == 1 && turns.count == 1 && turns[0].start < 45 && turns[0].end > 45 && turns[0].endReason == .stopped,
+                              "the live turn is not cut at the rotation (\(chunk))")
+                try validateCapturedMeetingInterval(track: .init(source: .mic, spans: spans), start: turns[0].start, end: turns[0].end)
+            }
+        }),
+        ("dictation longer than 45 s is one turn", {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (_, frames) = try writerFrames(root, seconds: 47, chunk: 1_024)
+            let socket = LiveFixtureSocket(), state = LiveFixtureState(), live = liveController(socket, state: state, continuous: true)
+            await live.start(); try await feedPaced(live, socket: socket, frames)
+            let turns = await live.finish()
+            try liveCheck(socket.commits == 1 && turns.count == 1 && turns[0].start == 0 && abs(turns[0].end - 47.0) < 0.07,
+                          "one commit covers the whole dictation")
+        }),
+        ("a 0.12 s clock gap still ends the turn", {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (spans, frames) = try writerFrames(root, seconds: 2.5, chunk: 1_600, gapAt: 1)
+            try liveCheck(spans.count == 2 && abs(spans[1].offset - 1.2) < 0.001, "a gap starts a part on the host clock")
+            let socket = LiveFixtureSocket(), state = LiveFixtureState(), live = liveController(socket, state: state)
+            await live.start(); try await feedPaced(live, socket: socket, frames)
+            let turns = await live.finish()
+            try liveCheck(turns.count == 2 && turns[0].endReason == .discontinuity && abs(turns[0].end - 1) < 0.001 && abs(turns[1].start - 1.2) < 0.001,
+                          "the gap ends the turn at the last real sample")
+        }),
+        ("a pause ends a turn only once it is 2 s long", {
+            let socket = LiveFixtureSocket(), state = LiveFixtureState(), live = liveController(socket, state: state)
+            await live.start()
+            // Room noise above the old 0.0001 threshold and below 0.004 counts as quiet.
+            try await feedPaced(live, socket: socket, [liveFrame(offset: 0)] + (1..<4).map { liveFrame(offset: Double($0) * 0.4, rms: 0.003) })
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try liveCheck(socket.commits == 0, "1.2 s of quiet does not end a 1.6 s turn")
+            live.offer(liveFrame(offset: 1.6, rms: 0.003))
+            try await liveUntil("pause commit at the floor") { socket.commits == 1 }
+            try liveCheck(state.turns.first?.endReason == .pause && state.turns.first?.end == 2, "the pause ends the turn once it is 2 s")
+            _ = await live.cancel()
+        }),
+        ("drafts carry their turn and announce it at the commit acknowledgement", {
+            let socket = LiveFixtureSocket(), state = LiveFixtureState(), live = controller(socket, state: state)
+            await live.start(); try await feedTurn(live, socket: socket, start: 0)
+            try await liveUntil("first commit") { socket.commits == 1 }
+            socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "item-A", "delta": "Hel"])
+            socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "item-A", "delta": "lo"])
+            socket.push(["type": "input_audio_buffer.committed", "item_id": "item-A", "previous_item_id": NSNull()])
+            try await liveUntil("draft announces its turn") { state.allDrafts.contains { $0.turnIdx == 0 } }
+            let drafts = state.allDrafts, first = drafts.firstIndex { $0.turnIdx == 0 }!
+            try liveCheck(drafts[..<first].allSatisfy { $0.turnIdx == nil && $0.itemID == "item-A" } && drafts[first].text == "Hello",
+                          "an unmapped draft has no turn; the ACK emits the accumulated text inside the throttle window")
+            socket.push(["type": "conversation.item.input_audio_transcription.completed", "item_id": "item-A", "transcript": "Hello."])
+            try await liveUntil("completion clears draft") { state.allDrafts.last?.text == "" }
+            try liveCheck(state.allDrafts.last?.turnIdx == 0, "the clearing draft keeps its turn")
+            try await feedTurn(live, socket: socket, start: 2)
+            try await liveUntil("second commit") { socket.commits == 2 }
+            socket.push(["type": "input_audio_buffer.committed", "item_id": "item-B", "previous_item_id": "item-A"])
+            try await liveUntil("textless item announces its turn") { state.allDrafts.last?.itemID == "item-B" }
+            try liveCheck(state.allDrafts.last?.turnIdx == 1 && state.allDrafts.last?.text == "", "an ACK before any delta still announces the turn")
+            try await Task.sleep(nanoseconds: 120_000_000)
+            socket.push(["type": "conversation.item.input_audio_transcription.delta", "item_id": "item-B", "delta": "Bee"])
+            try await liveUntil("mapped delta") { state.allDrafts.last?.text == "Bee" }
+            try liveCheck(state.allDrafts.last?.turnIdx == 1, "a mapped delta carries its turn")
+            socket.push(["type": "error", "error": ["code": "server_error", "type": "server_error"]])
+            try await liveUntil("invalidation clears draft") { socket.isClosed && state.allDrafts.last?.text == "" }
+            try liveCheck(state.allDrafts.last?.turnIdx == 1, "the invalidation clearing draft keeps its turn")
+            _ = await live.cancel()
+        }),
+        ("stopped Mac audio restarts until buffers arrive", {
+            let fixture = RecoveryFixture(interval: 10)
+            fixture.buffersArrive(fromAttempt: 1); fixture.down()
+            try await liveUntil("restart at once") { fixture.attempts == 1 && !fixture.recovery.isDown }
+            try liveCheck(fixture.health.map(\.state) == [.interrupted, .active], "Starting is hidden and buffers report it active")
+            await fixture.recovery.stop()
+        }),
+        ("failed Mac audio start retries every interval and stays down", {
+            let fixture = RecoveryFixture(interval: 0.03)
+            fixture.down(.unavailable)
+            try await liveUntil("repeated restarts") { fixture.attempts >= 3 }
+            try liveCheck(fixture.health.map(\.state) == [.unavailable] && fixture.recovery.isDown, "failed attempts never show Starting")
+            fixture.report(.init(source: .system, state: .silent, message: "No Mac audio has arrived yet."))
+            try liveCheck(fixture.health.count == 1, "the first-buffer wait of an attempt is hidden")
+            fixture.buffersArrive(fromAttempt: fixture.attempts + 1)
+            try await liveUntil("recovered") { !fixture.recovery.isDown }
+            let attempts = fixture.attempts
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try liveCheck(fixture.attempts == attempts && fixture.health.last?.state == .active, "the loop ends at the first buffer")
+            try liveCheck(fixture.recovery.begin(), "a later failure starts a new loop")
+            await fixture.recovery.stop()
+        }),
+        ("one Mac audio failure starts one loop", {
+            let fixture = RecoveryFixture(interval: 0.1, attemptSeconds: 0.02)
+            fixture.down()
+            try liveCheck(!fixture.recovery.begin() && !fixture.recovery.begin(), "further triggers while down do nothing")
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try liveCheck(fixture.attempts == 1, "one attempt at once, not one per trigger")
+            try await liveUntil("loop continues") { fixture.attempts >= 3 }
+            try liveCheck(!fixture.overlapped, "attempts never overlap")
+            await fixture.recovery.stop()
+        }),
+        ("stop cancels the Mac audio restart loop", {
+            let fixture = RecoveryFixture(interval: 10)
+            fixture.down()
+            try await liveUntil("first attempt") { fixture.attempts == 1 }
+            let started = Date()
+            await fixture.recovery.stop()
+            try liveCheck(Date().timeIntervalSince(started) < 1, "stop does not wait out the interval")
+            try liveCheck(!fixture.recovery.begin() && !fixture.recovery.isDown, "nothing restarts after stop")
+            let busy = RecoveryFixture(interval: 0.01, attemptSeconds: 0.1)
+            busy.down()
+            try await liveUntil("attempt in flight") { busy.attempts == 1 }
+            await busy.recovery.stop()
+            let after = busy.attempts
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try liveCheck(after == 1 && busy.attempts == 1, "stop waits for an attempt in flight and starts no other")
         }),
         ("missing-only recovery cache and actual capture gaps", {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

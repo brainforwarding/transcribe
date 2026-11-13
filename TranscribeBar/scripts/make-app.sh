@@ -70,10 +70,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>LSUIElement</key><true/>
+    <key>LSUIElement</key><false/>
     <key>NSMicrophoneUsageDescription</key><string>Transcribe records your microphone for dictation and meeting notes.</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleDocumentTypes</key><array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Audio or video</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.audio</string><string>public.movie</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>Voice note</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>CFBundleTypeExtensions</key><array><string>ogg</string><string>opus</string><string>oga</string></array>
+        </dict>
+    </array>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist"

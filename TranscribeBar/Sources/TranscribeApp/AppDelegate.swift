@@ -1,6 +1,8 @@
 import AppKit
+import UniformTypeIdentifiers
 import SwiftUI
 import Combine
+import TranscribeCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -18,13 +20,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var libraryWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var showingChip = false
-    private var shownWidth: CGFloat = 0
+    private var shownChipLayout = ""
     private var pasteShortcutEnabled: Bool?
     private var quitting = false
     private var updates: UpdateController?
+    private var workspaceObserver: NSObjectProtocol?
+    private var dockVisible: Bool?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(model.showInDock ? .regular : .accessory)
+        dockVisible = model.showInDock
         DesignSystem.registerFonts()
 #if TRANSCRIBE_VALIDATION_FIXTURE
         configureUpdates()
@@ -48,6 +53,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.showLibrary = { [weak self] in self?.showLibraryWindow() }
         model.showSettings = { [weak self] in self?.openSettings() }
         model.retryShortcuts = { [weak self] in self?.shortcuts.start() }
+        model.shortcutsChanged = { [weak self] in
+            guard let self else { return }
+            self.shortcuts.additionalShortcut = self.model.additionalShortcut
+        }
+        shortcuts.additionalShortcut = model.additionalShortcut
+        model.shortcutTestChanged = { [weak self] testing in self?.shortcuts.testing = testing }
+        shortcuts.onShortcutDetected = { [weak self] in self?.model.finishShortcutCheck(detected: true) }
         configureUpdates()
         shortcuts.dictationContext = { [weak self] in
             guard let self else { return .disabled }
@@ -69,8 +81,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             else { self.model.cancelDictation() }
         }
         shortcuts.onPasteLast = { [weak self] in self?.model.pasteLast() }
-        shortcuts.onAvailabilityChanged = { [weak self] available in self?.model.shortcutAvailable = available }
+        shortcuts.onAvailabilityChanged = { [weak self] available in
+            self?.model.shortcutAvailable = available
+            if !available { self?.model.cancelShortcutCheck() }
+        }
         shortcuts.start()
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.model.refreshPermissions() }
+        }
         model.objectWillChange
             .sink { [weak self] in
                 // @Published emits before the assignment. Read committed state on the next turn.
@@ -135,6 +155,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshNativeState() {
+        if dockVisible != model.showInDock {
+            NSApp.setActivationPolicy(model.showInDock ? .regular : .accessory)
+            dockVisible = model.showInDock
+        }
         if pasteShortcutEnabled != model.pasteLastShortcutEnabled {
             shortcuts.setPasteLastShortcut(enabled: model.pasteLastShortcutEnabled)
             pasteShortcutEnabled = model.pasteLastShortcutEnabled
@@ -145,10 +169,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.appearance = model.appearance == "dark" ? NSAppearance(named: .darkAqua)
             : model.appearance == "light" ? NSAppearance(named: .aqua) : nil
         if model.chipVisible, model.chipState != .hidden {
-            if !showingChip || shownWidth != model.chipWidth {
-                chip.show(ChipView(model: model), width: model.chipWidth)
+            if !showingChip || shownChipLayout != model.chipLayout {
+                chip.show(ChipView(model: model))
                 showingChip = true
-                shownWidth = model.chipWidth
+                shownChipLayout = model.chipLayout
             }
         } else if showingChip {
             chip.hide()
@@ -196,6 +220,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func pasteLast() { model.pasteLast() }
     @objc private func openMeetings() { model.openMeetings() }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    /// Dock icon, Finder "Open With" and File › Open all end in the same import.
+    func application(_ application: NSApplication, open urls: [URL]) { importAudio(urls) }
+    func openAudioFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.audio, .movie] + ["ogg", "opus", "oga"].compactMap { UTType(filenameExtension: $0) }
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK else { return }
+        importAudio(panel.urls)
+    }
+    func importRecordings() { showLibraryWindow(); model.importLegacyRecordings() }
+    /// No drop position here: the file goes to the open section, Meetings from anywhere else.
+    private func importAudio(_ urls: [URL]) {
+        let kind: SessionKind = model.sidebar == .dictation ? .dictation : .meeting
+        model.meetingSetupPresented = false; model.searchText = ""
+        showLibraryWindow()
+        model.importAudioFiles(urls, as: kind)
+    }
 
     @objc private func openLibrary() {
         model.sidebar = .dictation

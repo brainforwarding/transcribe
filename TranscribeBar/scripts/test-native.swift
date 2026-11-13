@@ -44,6 +44,20 @@ struct NativeSelftest {
         check(!taps.flagsChanged(optionDown: false, otherModifiers: false, keyCode: 61, at: 5.9), "Reversed timestamps do not start")
 
         var keys = ShortcutKeyRecognizer()
+        var chord = ShortcutKeyRecognizer()
+        check(chord.keyDown(code: 49, flags: [.maskControl, .maskAlternate], repeated: false,
+            consumesEscape: false, pasteLastEnabled: true, additionalShortcut: .controlOptionSpace, toggleEnabled: true) == .toggle,
+              "Additional chord toggles on first exact key down")
+        check(chord.keyDown(code: 49, flags: [], repeated: true, consumesEscape: false, pasteLastEnabled: true) == .consume,
+              "Held chord stays consumed even after modifiers or configuration change")
+        check(chord.consumesKeyUp(code: 49) && !chord.consumesKeyUp(code: 49), "Chord release consumed once")
+        check(!AdditionalShortcut.controlOptionSpace.matches(code: 49, flags: [.maskControl, .maskAlternate, .maskShift]), "Extra modifiers cannot toggle")
+        check(AdditionalShortcut.controlShiftSpace.matches(code: 49, flags: [.maskControl, .maskShift]), "Second configured chord matches")
+        check(!AdditionalShortcut.off.matches(code: 49, flags: [.maskControl, .maskAlternate]), "Off never matches")
+        check(chord.keyDown(code: 49, flags: [.maskControl, .maskAlternate], repeated: false,
+            consumesEscape: false, pasteLastEnabled: true, additionalShortcut: .controlOptionSpace, toggleEnabled: false) == .passThrough,
+              "Busy contexts preserve host shortcut")
+        await shortcutDeliveryChecks()
         check(keys.keyDown(code: 53, flags: [], repeated: false, consumesEscape: false, pasteLastEnabled: true) == .passThrough,
               "Idle/meeting Escape passes through")
         check(keys.keyDown(code: 53, flags: [], repeated: false, consumesEscape: true, pasteLastEnabled: true) == .cancel,
@@ -154,6 +168,63 @@ struct NativeSelftest {
         print("Native shortcut/cache/paste selftest passed (\(checks) checks)")
     }
 
+    @MainActor static func shortcutDeliveryChecks() async {
+        let service = ShortcutService()
+        var starts = 0, detections = 0, stops = 0, pastes = 0
+        var context: OptionShortcutContext = .idle
+        service.dictationContext = { context }
+        service.onStartDictation = { starts += 1 }
+        service.onStopDictation = { _ in stops += 1 }
+        service.onPasteLast = { pastes += 1 }
+        service.onShortcutDetected = { detections += 1; service.testing = false }
+        func event(_ type: CGEventType, code: UInt16, flags: CGEventFlags = [], at: UInt64 = 1) -> Bool {
+            let e = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: type != .keyUp)!
+            e.setIntegerValueField(.keyboardEventKeycode, value: Int64(code)); e.flags = flags; e.timestamp = at
+            return service.handle(type, e) == nil
+        }
+        func doubleOption() {
+            _ = event(.flagsChanged, code: 58, flags: .maskAlternate, at: 1_000_000_000)
+            _ = event(.flagsChanged, code: 58, at: 1_050_000_000)
+            _ = event(.flagsChanged, code: 58, flags: .maskAlternate, at: 1_150_000_000)
+            _ = event(.flagsChanged, code: 58, at: 1_200_000_000)
+        }
+        doubleOption()
+        service.testing = true
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(starts == 0 && detections == 0, "Arming test invalidates previously queued production start")
+        doubleOption()
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(detections == 1 && starts == 0 && pastes == 0, "Double Option dry run detects without recording or pasting")
+        service.testing = true
+        doubleOption(); service.testing = false
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(detections == 1 && starts == 0, "Disarming invalidates queued test gesture")
+        service.testing = true
+        check(event(.keyDown, code: 49, flags: [.maskControl, .maskAlternate]), "Test chord consumes key down")
+        check(event(.keyUp, code: 49), "Test chord consumes key up")
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(detections == 2 && starts == 0, "Additional chord dry run detects once")
+        _ = event(.keyDown, code: 9, flags: [.maskAlternate, .maskShift])
+        service.testing = true
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(pastes == 0, "Arming test invalidates a queued paste-last action")
+        service.testing = false
+        let id = UUID()
+        context = .capturing(id)
+        _ = event(.keyDown, code: 49, flags: [.maskControl, .maskAlternate])
+        _ = event(.keyUp, code: 49)
+        context = .idle
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(starts == 0 && stops == 0, "Queued chord stop cannot become idle start")
+        doubleOption(); service.additionalShortcut = .off
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        check(starts == 0, "Changing shortcut invalidates queued actions")
+        var availability: Bool? = true
+        service.onAvailabilityChanged = { availability = $0 }
+        service.stop()
+        check(availability == false, "Stopping publishes actual unavailable state")
+    }
+
     @MainActor static func pasteChecks() async {
         func editable(_ role: String? = kAXTextAreaRole, _ subrole: String? = nil,
                       _ protected: Bool? = nil, _ enabled: Bool? = true,
@@ -210,6 +281,21 @@ struct NativeSelftest {
 
         var posts = 0
         let engine = CurrentCaretPasteTransaction(board: board, wait: {})
+        var permissionChecks = 0
+        let revoked = await engine.run("synthetic", canDeliver: { true }, targetStillValid: { true },
+            postPaste: { posts += 1 }, verify: { false }, permissionAvailable: {
+                permissionChecks += 1; return permissionChecks < 3
+            })
+        check(revoked == .ready(reason: "Enable Accessibility to paste into the selected field.", feedback: .permission)
+              && posts == 0 && board.string(forType: .string) == "new user copy",
+              "Permission loss at final dispatch gate restores clipboard and keeps typed permission feedback")
+        var permissionStillAvailable = true
+        let permissionAfterDispatch = await engine.run("synthetic", canDeliver: { true }, targetStillValid: { true },
+            postPaste: { posts += 1; permissionStillAvailable = false }, verify: { false }, permissionAvailable: { permissionStillAvailable })
+        if case .unconfirmed = permissionAfterDispatch {
+            check(posts == 1, "Any unverified dispatched paste stays unconfirmed")
+        } else { check(false, "Dispatched paste cannot become permission-ready") }
+        board.clearContents(); board.setString("new user copy", forType: .string); posts = 0
         let denied = await engine.run("synthetic", canDeliver: { false }, targetStillValid: { true }, postPaste: { posts += 1 }, verify: { false })
         if case .ready = denied { check(posts == 0 && board.string(forType: .string) == "new user copy", "Revoked delivery emits zero keys and leaves clipboard alone") }
         else { check(false, "Revoked delivery must be ready") }

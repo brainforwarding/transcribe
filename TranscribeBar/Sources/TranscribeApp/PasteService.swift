@@ -96,16 +96,19 @@ final class CurrentCaretPasteTransaction {
     }) { self.board = board; self.wait = wait }
 
     func run(_ text: String, canDeliver: () -> Bool, targetStillValid: () -> Bool,
-             postPaste: () -> Void, verify: () -> Bool, terminal: Bool = false) async -> PasteService.Outcome {
+             postPaste: () -> Void, verify: () -> Bool, terminal: Bool = false,
+             permissionAvailable: () -> Bool = { true }) async -> PasteService.Outcome {
         guard !delivering else { return .unconfirmed(reason: "A paste is already in progress. Check the field before pasting again.") }
         delivering = true
         defer { delivering = false }
+        guard permissionAvailable() else { return .ready(reason: "Enable Accessibility to paste into the selected field.", feedback: .permission) }
         guard canDeliver(), !Task.isCancelled, targetStillValid() else {
             return .ready(reason: "Paste was cancelled or the selected field changed. Your transcript is saved.")
         }
         guard let clipboard = PasteboardTransaction(board: board) else {
             return .ready(reason: "The clipboard could not be preserved. Your transcript is saved.")
         }
+        guard permissionAvailable() else { return .ready(reason: "Enable Accessibility to paste into the selected field.", feedback: .permission) }
         guard canDeliver(), !Task.isCancelled, targetStillValid() else {
             return .ready(reason: "Paste was cancelled or the selected field changed. Your transcript is saved.")
         }
@@ -114,6 +117,10 @@ final class CurrentCaretPasteTransaction {
             return .ready(reason: "The clipboard changed before paste. Your transcript is saved.")
         }
         // No suspension between this final authorization/focus check and both key events.
+        guard permissionAvailable() else {
+            clipboard.restoreIfOwned()
+            return .ready(reason: "Enable Accessibility to paste into the selected field.", feedback: .permission)
+        }
         guard canDeliver(), !Task.isCancelled, targetStillValid() else {
             clipboard.restoreIfOwned()
             return .ready(reason: "Paste was cancelled or the selected field changed. Your transcript is saved.")
@@ -144,9 +151,11 @@ final class PasteService {
     var diagnosticTarget: (processID: pid_t, element: AXUIElement)?
 #endif
 
+    enum Feedback: Equatable { case saved, permission, field, unconfirmed }
+
     enum Outcome: Equatable {
         case inserted
-        case ready(reason: String)
+        case ready(reason: String, feedback: Feedback = .saved)
         /// A write was attempted, but its result is unknown. Do not paste or copy again automatically.
         case unconfirmed(reason: String)
     }
@@ -162,17 +171,17 @@ final class PasteService {
     func deliverAtCurrentCaret(_ text: String, canDeliver: @escaping @MainActor () -> Bool) async -> Outcome {
         guard !text.isEmpty else { return .ready(reason: "No text to paste.") }
         guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else {
-            return .ready(reason: "Enable Accessibility to paste into the selected field.")
+            return .ready(reason: "Enable Accessibility to paste into the selected field.", feedback: .permission)
         }
         guard let app = NSWorkspace.shared.frontmostApplication,
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-            return .ready(reason: "Select an editable text field in another app.")
+            return .ready(reason: "Select an editable text field in another app.", feedback: .field)
         }
         let terminal = Self.terminalBundleIDs.contains(app.bundleIdentifier ?? "")
         let terminalWindow = terminal ? focusedWindow(in: app.processIdentifier) : nil
         guard let element = focusedElement(in: app.processIdentifier),
               terminal ? isTerminalInput(element, hasFocusedWindow: terminalWindow != nil) : isPasteEditable(element) else {
-            return .ready(reason: "The current field does not expose safe text editing. Select an editable text field.")
+            return .ready(reason: "The current field does not expose safe text editing. Select an editable text field.", feedback: .field)
         }
         let payload = terminal ? PasteTargetPolicy.terminalPayload(text) : text
         guard !terminal || !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -217,7 +226,7 @@ final class PasteService {
                   self.stringAttribute(target.element, kAXValueAttribute) == expected,
                   let range = self.selectedRange(target.element), self.same(range, expectedCaret) else { return false }
             return true
-        }, terminal: terminal)
+        }, terminal: terminal, permissionAvailable: { AXIsProcessTrusted() && CGPreflightPostEventAccess() })
     }
 
     private static let terminalBundleIDs: Set<String> = [

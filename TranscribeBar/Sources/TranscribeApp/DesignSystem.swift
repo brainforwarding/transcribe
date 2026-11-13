@@ -154,8 +154,8 @@ struct InputMeter: View {
     @State private var targetLevel = 0.0
     @State private var smoothedLevel = 0.0
     @State private var history = Array(repeating: 0.0, count: 23)
-    private var width: CGFloat { compact ? 44 : 92 }
-    private var height: CGFloat { compact ? 16 : 32 }
+    private var width: CGFloat { compact ? 32 : 92 }
+    private var height: CGFloat { compact ? 12 : 32 }
     private var normalizedLevel: Double { level.isFinite ? min(1, max(0, level)) : 0 }
 
     var body: some View {
@@ -169,8 +169,8 @@ struct InputMeter: View {
                     }
             } else {
                 HStack(spacing: 1) {
-                    ForEach(Array(history.suffix(compact ? 15 : 23).enumerated()), id: \.offset) { index, sample in
-                        Capsule().fill(DesignSystem.action.opacity(0.35 + 0.65 * Double(index + 1) / Double(compact ? 15 : 23)))
+                    ForEach(Array(history.suffix(compact ? 11 : 23).enumerated()), id: \.offset) { index, sample in
+                        Capsule().fill(DesignSystem.action.opacity(0.35 + 0.65 * Double(index + 1) / Double(compact ? 11 : 23)))
                             .frame(width: compact ? 2 : 3,
                                    height: 2 + (height - 2) * pow(sample, 0.65))
                     }

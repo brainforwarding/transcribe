@@ -67,11 +67,19 @@ struct OptionTapRecognizer {
 }
 
 struct ShortcutKeyRecognizer {
-    enum Decision: Equatable { case passThrough, consume, cancel, pasteLast }
+    enum Decision: Equatable { case passThrough, consume, cancel, pasteLast, toggle }
     private var suppressedEscape = false
+    private var suppressedChord: UInt16?
 
     mutating func keyDown(code: UInt16, flags: CGEventFlags, repeated: Bool,
-                          consumesEscape: Bool, pasteLastEnabled: Bool) -> Decision {
+                          consumesEscape: Bool, pasteLastEnabled: Bool,
+                          additionalShortcut: AdditionalShortcut = .off, toggleEnabled: Bool = false) -> Decision {
+        if suppressedChord == code { return .consume }
+        if toggleEnabled, additionalShortcut.matches(code: code, flags: flags) {
+            guard !repeated else { return .passThrough }
+            suppressedChord = code
+            return .toggle
+        }
         if code == 53, consumesEscape || suppressedEscape {
             let first = !suppressedEscape && !repeated
             suppressedEscape = true
@@ -85,12 +93,13 @@ struct ShortcutKeyRecognizer {
     }
 
     mutating func consumesKeyUp(code: UInt16) -> Bool {
+        if suppressedChord == code { suppressedChord = nil; return true }
         guard code == 53, suppressedEscape else { return false }
         suppressedEscape = false
         return true
     }
 
-    mutating func reset() { suppressedEscape = false }
+    mutating func reset() { suppressedEscape = false; suppressedChord = nil }
 }
 
 /// Runs an active event tap so Escape can be consumed during dictation without reaching
@@ -102,6 +111,11 @@ final class ShortcutService {
     var onCancel: (() -> Void)?
     var onPasteLast: (() -> Void)?
     var onAvailabilityChanged: ((Bool) -> Void)?
+    var onShortcutDetected: (() -> Void)?
+    var testing = false { didSet { if oldValue != testing { invalidatePendingActions() } } }
+    var additionalShortcut: AdditionalShortcut = .controlOptionSpace {
+        didSet { if oldValue != additionalShortcut { invalidatePendingActions() } }
+    }
     var consumesEscape = false
     var observesEscapeDuringMeeting = false
     private var pasteLastEnabled = UserDefaults.standard.object(forKey: "pasteLastShortcutEnabled") as? Bool ?? true
@@ -109,10 +123,18 @@ final class ShortcutService {
     private var keyRecognizer = ShortcutKeyRecognizer()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
+    private var generation: UInt64 = 0
+
+    func invalidatePendingActions() { generation &+= 1; recognizer.invalidate() }
 
     @discardableResult
     func start() -> Bool {
-        guard tap == nil else { return true }
+        guard AXIsProcessTrusted() else { stop(); return false }
+        if let tap, CFMachPortIsValid(tap) {
+            if !CGEvent.tapIsEnabled(tap: tap) { CGEvent.tapEnable(tap: tap, enable: true) }
+            if CGEvent.tapIsEnabled(tap: tap) { onAvailabilityChanged?(true); return true }
+        }
+        stop()
         let mask = (CGEventMask(1) << CGEventType.flagsChanged.rawValue)
             | (CGEventMask(1) << CGEventType.keyDown.rawValue)
             | (CGEventMask(1) << CGEventType.keyUp.rawValue)
@@ -142,6 +164,8 @@ final class ShortcutService {
         source = nil
         recognizer.invalidate()
         keyRecognizer.reset()
+        invalidatePendingActions()
+        onAvailabilityChanged?(false)
     }
 
     func setPasteLastShortcut(enabled: Bool) {
@@ -149,10 +173,12 @@ final class ShortcutService {
         UserDefaults.standard.set(enabled, forKey: "pasteLastShortcutEnabled")
     }
 
-    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+    // Internal so native selftests can supply synthetic events without an OS event tap.
+    func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            recognizer.invalidate()
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            invalidatePendingActions()
+            if AXIsProcessTrusted(), let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            onAvailabilityChanged?(AXIsProcessTrusted() && tap.map { CGEvent.tapIsEnabled(tap: $0) } == true)
             return Unmanaged.passUnretained(event)
         }
         let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -163,30 +189,32 @@ final class ShortcutService {
                 otherModifiers: !flags.intersection(others).isEmpty,
                 keyCode: code, at: TimeInterval(event.timestamp) / 1_000_000_000,
                 context: dictationContext()) {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, action.isApplicable(to: self.dictationContext()) else { return }
-                    // Bind the recognized action to its original session. A delayed stop
-                    // cannot become a start after recording/transcription finishes.
-                    switch action {
-                    case .start:
-                        self.onStartDictation?()
-                    case .stop(let id):
-                        self.onStopDictation?(id)
-                    }
-                }
+                dispatch(action)
             }
         } else if type == .keyDown {
             recognizer.invalidate()
             let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             switch keyRecognizer.keyDown(code: code, flags: flags, repeated: repeated,
-                consumesEscape: consumesEscape, pasteLastEnabled: pasteLastEnabled) {
+                consumesEscape: consumesEscape, pasteLastEnabled: pasteLastEnabled && !testing,
+                additionalShortcut: additionalShortcut, toggleEnabled: dictationContext() != .disabled) {
+            case .toggle:
+                switch dictationContext() {
+                case .idle: dispatch(.start)
+                case .capturing(let id): dispatch(.stop(id))
+                case .disabled: break
+                }
+                return nil
             case .cancel:
                 // This tap runs on the main run loop. Revoke insertion before returning
                 // the observed Escape, rather than racing a queued provider completion.
                 onCancel?()
                 return nil
             case .pasteLast:
-                DispatchQueue.main.async { [weak self] in self?.onPasteLast?() }
+                let epoch = generation
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.generation == epoch, !self.testing else { return }
+                    self.onPasteLast?()
+                }
                 return nil
             case .consume: return nil
             case .passThrough:
@@ -200,6 +228,21 @@ final class ShortcutService {
             recognizer.invalidate()
         }
         return Unmanaged.passUnretained(event)
+    }
+
+    private func dispatch(_ action: OptionShortcutAction) {
+        let epoch = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == epoch, action.isApplicable(to: self.dictationContext()) else { return }
+            if self.testing {
+                if action == .start { self.onShortcutDetected?() }
+                return
+            }
+            switch action {
+            case .start: self.onStartDictation?()
+            case .stop(let id): self.onStopDictation?(id)
+            }
+        }
     }
 
     deinit { stop() }

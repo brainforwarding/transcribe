@@ -9,5 +9,6 @@ swiftc -target arm64-apple-macosx13.0 \
     "$ROOT/Sources/TranscribeApp/Keychain.swift" \
     "$ROOT/Sources/TranscribeApp/Config.swift" \
     "$ROOT/Sources/TranscribeApp/PasteService.swift" \
+    "$ROOT/Sources/TranscribeApp/DictationPreferences.swift" \
     "$ROOT/scripts/test-native.swift" -o "$STAGE/native-selftest"
 "$STAGE/native-selftest"

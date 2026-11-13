@@ -148,7 +148,7 @@ public func requestAudioTranscript(fileURL: URL, model: AudioTranscriptionModel,
         if let language = languages.first { field("language", language) }
     }
     let ext = fileURL.pathExtension.lowercased()
-    let mime = ext == "wav" ? "audio/wav" : "audio/mp4"
+    let mime = audioMIMEType(for: fileURL)
     body.appendString("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.\(ext)\"\r\nContent-Type: \(mime)\r\n\r\n")
     body.append(audio)
     body.appendString("\r\n--\(boundary)--\r\n")
@@ -164,6 +164,14 @@ public func requestAudioTranscript(fileURL: URL, model: AudioTranscriptionModel,
         throw ProviderError.invalidResponse
     }
     return AudioTranscriptResponse(text: decoded.text, segments: model == .text ? [] : segments)
+}
+
+func audioMIMEType(for url: URL) -> String {
+    switch url.pathExtension.lowercased() {
+    case "wav": return "audio/wav"
+    case "ogg", "opus", "oga": return "audio/ogg"
+    default: return "audio/mp4"
+    }
 }
 
 func providerData(_ request: URLRequest, session: URLSession) async throws -> Data {

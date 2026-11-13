@@ -56,7 +56,8 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var exportURL: URL?
     public var importURL: URL?
     public var imported: Bool
-    public var language: String?
+    /// Language hints for transcription; empty lets the model detect any language.
+    public var languages: [String]
     public var keywords: [String]
     public var liveMeetingVersion: Int?
     public var liveDictationVersion: Int?
@@ -70,12 +71,20 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     public var transcriptRevision: Int
     public var summaryTranscriptRevision: Int?
     public var summaryIsStale: Bool { liveMeetingVersion != nil && !summary.isEmpty && summaryTranscriptRevision != transcriptRevision }
+    /// The one-paragraph meeting summary shown under the title. `summary` holds legacy notes.
+    public var overview: String
+    /// True while the title was chosen by the app (blank setup title or a file name).
+    public var titleIsAutomatic: Bool
+    /// A dropped file the app cannot decode (Ogg), kept whole inside the record's folder.
+    public var importedAudio: URL?
+    /// The name of a dropped or opened file this record was made from.
+    public var importedFrom: String?
 
     public init(id: UUID = UUID(), kind: SessionKind, meetingMode: MeetingMode = .online,
-                title: String, startedAt: Date = Date(), language: String? = nil,
+                title: String, startedAt: Date = Date(), languages: [String] = [],
                 keywords: [String] = []) {
         self.id = id; self.kind = kind; self.meetingMode = meetingMode
-        self.title = title; self.startedAt = startedAt; self.language = language
+        self.title = title; self.startedAt = startedAt; self.languages = languages
         self.keywords = keywords; duration = 0; status = .starting
         delivery = kind == .dictation ? .eligible : .never
         notes = ""; preview = ""; transcript = ""; rawTranscript = nil; formattingFailure = nil; serviceProviderID = nil; segments = []
@@ -84,9 +93,11 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         exportURL = nil; importURL = nil; imported = false
         liveMeetingVersion = nil; liveDictationVersion = nil; dictationPerformance = nil
         meetingTurns = []; transcriptRevision = 0; summaryTranscriptRevision = nil
+        overview = ""; titleIsAutomatic = false; importedAudio = nil; importedFrom = nil
     }
 
     public var canRecover: Bool {
+        if importedAudio != nil { return status == .failed || status == .cancelled }
         let hasAudio = tracks.contains { !$0.spans.isEmpty }
         if usesLiveTranscription {
             return hasAudio && !uncoveredMeetingAudio(tracks: tracks, turns: meetingTurns, includePending: false).isEmpty
@@ -100,16 +111,19 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, meetingMode, title, startedAt, audioCompletedAt, duration, status, delivery, notes, preview, transcript, rawTranscript, formattingFailure, serviceProviderID,
              segments, summary, summaryStatus, summaryFailure, summaryEvidenceIDs, summaryEvidence, summaryNotesSnapshot,
-             issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, language, keywords,
-             liveMeetingVersion, liveDictationVersion, fixGrammar, dictationPerformance, dictationBoundaryResult, meetingTurns, transcriptRevision, summaryTranscriptRevision
+             issues, transcriptionIssues, tracks, captureIncomplete, exportURL, importURL, imported, languages, keywords,
+             liveMeetingVersion, liveDictationVersion, fixGrammar, dictationPerformance, dictationBoundaryResult, meetingTurns, transcriptRevision, summaryTranscriptRevision,
+             overview, titleIsAutomatic, importedAudio, importedFrom
     }
+    private enum LegacyKeys: String, CodingKey { case language }
     public init(from decoder: Decoder) throws {
         let v = try decoder.container(keyedBy: CodingKeys.self)
         self.init(id: try v.decode(UUID.self, forKey: .id), kind: try v.decode(SessionKind.self, forKey: .kind),
                   meetingMode: try v.decodeIfPresent(MeetingMode.self, forKey: .meetingMode) ?? .online,
                   title: try v.decode(String.self, forKey: .title),
                   startedAt: try v.decode(Date.self, forKey: .startedAt),
-                  language: try v.decodeIfPresent(String.self, forKey: .language),
+                  languages: try v.decodeIfPresent([String].self, forKey: .languages)
+                      ?? decoder.container(keyedBy: LegacyKeys.self).decodeIfPresent(String.self, forKey: .language).map { [$0] } ?? [],
                   keywords: try v.decodeIfPresent([String].self, forKey: .keywords) ?? [])
         liveMeetingVersion = try v.decodeIfPresent(Int.self, forKey: .liveMeetingVersion)
         liveDictationVersion = try v.decodeIfPresent(Int.self, forKey: .liveDictationVersion)
@@ -143,5 +157,9 @@ public struct SessionRecord: Identifiable, Codable, Sendable {
         exportURL = try v.decodeIfPresent(URL.self, forKey: .exportURL)
         imported = try v.decodeIfPresent(Bool.self, forKey: .imported) ?? false
         importURL = try v.decodeIfPresent(URL.self, forKey: .importURL) ?? (imported ? exportURL : nil)
+        overview = try v.decodeIfPresent(String.self, forKey: .overview) ?? ""
+        titleIsAutomatic = try v.decodeIfPresent(Bool.self, forKey: .titleIsAutomatic) ?? (title == "Meeting")
+        importedAudio = try v.decodeIfPresent(URL.self, forKey: .importedAudio)
+        importedFrom = try v.decodeIfPresent(String.self, forKey: .importedFrom)
     }
 }

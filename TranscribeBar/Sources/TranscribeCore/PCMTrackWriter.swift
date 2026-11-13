@@ -12,6 +12,8 @@ final class PCMTrackWriter {
     private var inputFormat: AVAudioFormat?
     private var framesInPart = 0
     private var expectedPTS: Double?
+    /// Where a part that follows a full one starts: on the running sample count, not the host clock.
+    private var continuesAt: Double?
     private var lastManifestTime = 0.0
     private(set) var spans: [AudioSpan] = []
     private(set) var sawSignal = false
@@ -34,7 +36,7 @@ final class PCMTrackWriter {
         // A clock discontinuity starts a new span so timing stays exact. It is not reported:
         // short gaps are routine (device start-up, scheduling), and real outages are caught
         // by each source's liveness watchdog, which reports a stall of 3 s or more.
-        if let expectedPTS, abs(pts - expectedPTS) > 0.12 { finishPart() }
+        if let expectedPTS, abs(pts - expectedPTS) > 0.12 { finishPart(); continuesAt = nil }
         expectedPTS = pts + inputDuration
         if inputFormat != input.format {
             inputFormat = input.format
@@ -71,7 +73,12 @@ final class PCMTrackWriter {
                 }
                 file = try AVAudioFile(forWriting: url, settings: format.settings)
                 framesInPart = 0
-                spans.append(AudioSpan(url: url, offset: max(0, pts - epoch + Double(consumed) / Self.rate), duration: 0))
+                // The host clock is ~1 ms exact; rotating on it would cut a live turn at every part.
+                // Drift past a discontinuity's worth re-anchors the timeline instead.
+                let clock = max(0, pts - epoch + Double(consumed) / Self.rate)
+                let offset = continuesAt.flatMap { abs($0 - clock) <= 0.12 ? $0 : nil } ?? clock
+                continuesAt = nil
+                spans.append(AudioSpan(url: url, offset: offset, duration: 0))
                 try persistManifest()
             }
             let count = min(Self.partFrames - framesInPart, Int(converted.frameLength) - consumed)
@@ -85,11 +92,13 @@ final class PCMTrackWriter {
             spans[spans.count - 1].duration = Double(framesInPart) / Self.rate
             onAudioFrame?(CapturedAudioFrame(source: source, offset: offset,
                 pcmFloat32: Data(bytes: dest, count: count * MemoryLayout<Float>.size), rms: rms))
-            if framesInPart == Self.partFrames { finishPart() }
+            if framesInPart == Self.partFrames {
+                continuesAt = spans[spans.count - 1].offset + spans[spans.count - 1].duration; finishPart()
+            }
         }
         if pts - lastManifestTime >= 1 { try persistManifest(); lastManifestTime = pts }
     }
-    func stop() -> [AudioSpan] { finishPart(); return spans }
+    func stop() -> [AudioSpan] { finishPart(); continuesAt = nil; return spans }
     func closedSpans() -> [AudioSpan] { file == nil ? spans : Array(spans.dropLast()) }
     private func health(_ state: CaptureHealthState, message: String? = nil) {
         guard lastHealth != state else { return }

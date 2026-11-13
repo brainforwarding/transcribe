@@ -18,6 +18,7 @@ struct SetupView: View {
                 }
                 setupRow("Microphone", icon: "onboarding-imgIconMicrophone", detail: "Capture your voice.", allowed: model.micGranted, action: model.grantMic)
                 setupRow("Paste & shortcuts", icon: "onboarding-imgIconMonitor", detail: "Use double Option and insert at your cursor.", allowed: model.accessibilityGranted && model.shortcutAvailable, action: model.grantShortcuts)
+                DictationCheckView()
                 if model.sidebar == .meetings { setupRow("Mac audio", icon: "onboarding-imgIconMonitor", detail: "Capture the other side of online meetings.", allowed: model.screenGranted, action: model.grantScreen) }
                 if !model.consentAccepted {
                     Toggle("I’ll let participants know before recording a meeting.", isOn: $consent).toggleStyle(.checkbox)
@@ -41,26 +42,86 @@ struct SetupView: View {
     }
 }
 
+/// The model owns the check so it survives setup being replaced by history.
+struct DictationCheckView: View {
+    @EnvironmentObject var model: AppModel
+    var inSheet = false
+    private let permissionTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Check dictation").font(DesignSystem.font(18, weight: .bold))
+            Text("Test your shortcut, then try a sentence in another app.").foregroundStyle(DesignSystem.muted)
+            HStack(spacing: 12) {
+                Button(shortcutButtonTitle) {
+                    if model.shortcutCheck == .listening { model.cancelShortcutCheck() }
+                    else if model.accessibilityGranted && !model.shortcutAvailable { model.retryShortcuts?() }
+                    else { model.beginShortcutCheck() }
+                }.buttonStyle(CirclesButtonStyle()).fixedSize()
+                Text(shortcutStatus).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted)
+                    .accessibilityLabel(shortcutStatus)
+            }.disabled(model.isBusy || model.updateInProgress)
+            Text(inSheet ? "Open a text field in another app. Start dictation, say a short sentence, then finish. Come back here when the text appears."
+                 : "Open a text field in another app. Start dictation, say a short sentence, then finish. Return to Settings → Check dictation when the text appears.")
+                .font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Button("Text appeared") { model.dictationChecked = true }.buttonStyle(CirclesButtonStyle())
+                    .disabled(model.isBusy || model.updateInProgress || model.lastRecordWithText == nil)
+                if model.dictationChecked { Text("Dictation checked").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.success) }
+            }
+        }
+        .onDisappear { model.cancelShortcutCheck() }
+        .onReceive(permissionTimer) { _ in
+            guard NSApp.isActive, !model.updateInProgress else { return }
+            Task { await model.refreshPermissions() }
+        }
+    }
+
+    private var shortcutButtonTitle: String {
+        if model.shortcutCheck == .listening { return "Cancel test" }
+        return model.accessibilityGranted && !model.shortcutAvailable ? "Retry shortcuts" : "Test shortcut"
+    }
+
+    private var shortcutStatus: String {
+        if !model.accessibilityGranted { return "Enable Accessibility for shortcuts and pasting." }
+        if !model.shortcutAvailable { return "Shortcuts unavailable" }
+        switch model.shortcutCheck {
+        case .idle: return "Double Option or \(model.additionalShortcut == .off ? "enable an additional shortcut in Settings" : model.additionalShortcut.title)."
+        case .listening: return "Listening… Press double Option or your additional shortcut."
+        case .detected: return "Shortcut detected"
+        case .timedOut: return "Shortcut not detected. Check Accessibility, then try again."
+        }
+    }
+}
+
 struct DictionaryView: View {
     @EnvironmentObject var model: AppModel
     @State private var word = ""
     @State private var validation = ""
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 20) {
             Text("Dictionary").font(DesignSystem.font(28, weight: .bold, relativeTo: .title))
-            Text("Names and terms for dictation.").foregroundStyle(DesignSystem.muted)
-            HStack(spacing: 12) {
-                TextField("Add a name or term", text: $word).textFieldStyle(.plain).padding(.horizontal, 16).frame(height: 44).background(DesignSystem.surface, in: Capsule()).overlay(Capsule().strokeBorder(DesignSystem.inputBorder, lineWidth: 1)).onSubmit(add)
-                Button("Add", action: add).buttonStyle(CirclesButtonStyle(primary: true, compact: false)).disabled(word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            HStack(spacing: 8) {
+                TextField("Add a name or term", text: $word).textFieldStyle(.roundedBorder).frame(width: 320).onSubmit(add)
+                Button("Add", action: add).buttonStyle(.bordered).disabled(word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             if !validation.isEmpty { Text(validation).font(DesignSystem.font(13)).foregroundStyle(DesignSystem.error) }
-            ScrollView { LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(model.dictionaryWords, id: \.self) { item in
-                    HStack { Text(item); Spacer(); Button("Remove") { model.removeDictionaryWord(item) }.buttonStyle(.plain).foregroundStyle(DesignSystem.link).accessibilityLabel("Remove \(item)") }.padding(.vertical, 12)
-                    Divider()
-                }
-            } }
-            if model.dictionaryWords.isEmpty { Text("No terms added yet").font(DesignSystem.font(13)).foregroundStyle(DesignSystem.muted) }
+            if !model.dictionaryWords.isEmpty {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(model.dictionaryWords.enumerated()), id: \.element) { index, item in
+                            if index > 0 { Divider().overlay(DesignSystem.border).padding(.leading, 16) }
+                            HStack(spacing: 8) {
+                                Text(item)
+                                Spacer(minLength: 16)
+                                Button("Remove") { model.removeDictionaryWord(item) }.buttonStyle(.plain).foregroundStyle(DesignSystem.link).accessibilityLabel("Remove \(item)")
+                            }.padding(.horizontal, 16).frame(minHeight: 48)
+                        }
+                    }
+                    .background(DesignSystem.page, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(DesignSystem.border, lineWidth: 1))
+                }.frame(maxWidth: 700)
+            }
         }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
     private func add() {

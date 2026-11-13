@@ -14,6 +14,7 @@ trap 'rm -rf "$STAGE"' EXIT
 swiftc -target arm64-apple-macosx13.0 -I "$BIN_DIR/Modules" \
     "$ROOT/Sources/TranscribeApp/AppModel.swift" \
     "$ROOT/Sources/TranscribeApp/PasteService.swift" \
+    "$ROOT/Sources/TranscribeApp/DictationPreferences.swift" \
     "$ROOT/Sources/TranscribeApp/Permissions.swift" \
     "$ROOT/Sources/TranscribeApp/Keychain.swift" \
     "$ROOT/Sources/TranscribeApp/Config.swift" \

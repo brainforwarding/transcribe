@@ -35,7 +35,11 @@ public struct LiveMeetingDraft: Sendable, Equatable, Identifiable {
     public let source: Source
     public let itemID: String
     public let text: String
-    public init(source: Source, itemID: String, text: String) { self.source = source; self.itemID = itemID; self.text = text }
+    /// The meeting turn this provider item was committed as, once acknowledged.
+    public let turnIdx: Int?
+    public init(source: Source, itemID: String, text: String, turnIdx: Int? = nil) {
+        self.source = source; self.itemID = itemID; self.text = text; self.turnIdx = turnIdx
+    }
 }
 
 /// Captured samples minus sealed coverage. Tiny frame-rounding tolerances are not

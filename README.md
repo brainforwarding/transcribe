@@ -1,10 +1,26 @@
 # Transcribe
 
+**[Download Transcribe 2.1.0 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg)** 路 Apple Silicon, macOS 13 or later 路 signed and notarized
+
+Open the download, drag Transcribe to Applications, then open it.
+
+**Install with Bash**
+
+```bash
+curl -fsSL --proto '=https' https://raw.githubusercontent.com/brainforwarding/transcribe/master/scripts/install-mac.sh | /bin/bash
+```
+
+**Ask your agent to install it**
+
+```text
+Install Transcribe for Mac using the signed release and instructions at https://github.com/brainforwarding/transcribe/blob/master/docs/INSTALL.md
+```
+
+[Installation details](docs/INSTALL.md)
+
 <img src="docs/assets/transcribe-card.jpg" alt="Transcribe: speak where you work, remember what was discussed. A live meeting transcript beside your notes, and the dictation chip recording." width="100%">
 
 A Mac app that turns speech into text. Use it to dictate into any app, or to record a meeting and get a transcript and notes.
-
-**[Download Transcribe 2.1.0 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg)** 路 Apple Silicon, macOS 13 or later 路 signed and notarized
 
 https://github.com/user-attachments/assets/d4a4af78-cfd9-4e01-9ce1-a4d9795d30bd
 
@@ -18,9 +34,9 @@ A dictation can last up to five minutes. If a paste goes wrong, Option鈥揝hift鈥
 
 ## Meetings
 
-Record an online call (your microphone plus the audio playing on your Mac) or an in-person conversation (microphone only). Read the live transcript and write your own notes while it records. Confirmed passages stay unchanged. When you finish, get a separate summary of decisions and next steps with links back to supporting transcript passages.
+Record an online call (your microphone plus the audio playing on your Mac) or an in-person conversation (microphone only). The live transcript keeps each passage where it first appeared. When you finish, the meeting is a title, one paragraph saying what happened, and the transcript; **Copy transcript** pastes cleanly into Slack. Drop an audio or video file on the window, including a WhatsApp voice note: release it on the left to make a meeting, on the right to make a dictation.
 
-<img src="docs/assets/meetings.svg" alt="A meeting is recorded with a live transcript beside your notes, then becomes a summary with decisions and next steps linked to the transcript." width="100%">
+<img src="docs/assets/meetings.svg" alt="A meeting is recorded with a live transcript, then becomes a title, a summary paragraph and the transcript." width="100%">
 
 ## Get started
 

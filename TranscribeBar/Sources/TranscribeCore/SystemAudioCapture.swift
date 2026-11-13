@@ -21,6 +21,7 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
     private var firstPTS: CMTime?
     private var liveness = AudioLiveness()
     private var lastLivenessFailure: AudioLiveness.Failure?
+    private var awaitingRestartBuffer = false
     private var watchdog: DispatchSourceTimer?
     private let recorder: PCMTrackWriter
     public var onLog: (@Sendable (String) -> Void)?
@@ -29,6 +30,9 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
     public var onHealth: (@Sendable (CaptureHealth) -> Void)?
     public var onPart: (@Sendable (AudioSpan) -> Void)?
     public var onAudioFrame: (@Sendable (CapturedAudioFrame) -> Void)?
+    /// The stream stopped with an error, or its buffers stopped arriving (nil). Mac audio needs a restart.
+    public var onInterrupted: (@Sendable (NSError?) -> Void)?
+    static let stoppedMessage = "Mac audio stopped. Your microphone is still recording."
     public init(outputURL: URL, epoch: Double = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))) {
         recorder = PCMTrackWriter(directory: outputURL.deletingLastPathComponent(), source: .system, epoch: epoch)
         super.init()
@@ -87,8 +91,9 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
             // but this is not evidence that system audio was successfully captured.
             onHealth?(CaptureHealth(source: .system, state: .silent, message: "No Mac audio has arrived yet."))
         } else {
-            onHealth?(CaptureHealth(source: .system, state: .interrupted,
-                message: "Mac audio stopped arriving. Your microphone is still recording."))
+            // Reported before the restart begins, so a fast recovery cannot be followed by a stale "Interrupted".
+            onHealth?(CaptureHealth(source: .system, state: .interrupted, message: Self.stoppedMessage))
+            if !isStopped { onInterrupted?(nil) } // a final check at stop is not a reason to restart
         }
     }
     @discardableResult
@@ -112,6 +117,8 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
             return true
         }
         guard allowed else { throw CancellationError() }
+        // The first buffer of a restarted stream reports it active again.
+        writeQueue.sync { awaitingRestartBuffer = true }
         try await start()
     }
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -121,8 +128,8 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
         writeQueue.async { [weak self] in
             guard let self, !self.isStopped else { return }
             self.liveness.received(at: captureHostSeconds())
-            if self.lastLivenessFailure != nil {
-                self.lastLivenessFailure = nil
+            if self.lastLivenessFailure != nil || self.awaitingRestartBuffer {
+                self.lastLivenessFailure = nil; self.awaitingRestartBuffer = false
                 self.onHealth?(CaptureHealth(source: .system, state: .active))
             }
             if self.firstPTS == nil { self.firstPTS = pts; self.onFirstBuffer?() }
@@ -135,7 +142,8 @@ public final class SystemAudioCapture: NSObject, SCStreamDelegate, SCStreamOutpu
     }
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
         guard !isStopped else { return }
-        onHealth?(CaptureHealth(source: .system, state: .interrupted, message: "Mac audio stopped. Retry Mac audio to continue."))
+        onHealth?(CaptureHealth(source: .system, state: .interrupted, message: Self.stoppedMessage))
+        onInterrupted?(error as NSError)
         onLevel?(0)
     }
 
