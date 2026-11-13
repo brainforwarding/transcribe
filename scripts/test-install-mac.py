@@ -22,7 +22,7 @@ elif name=='curl':
  if failure=='download': sys.exit(1)
  pathlib.Path(args[args.index('-o')+1]).write_text('fixture image')
 elif name=='shasum':
- print(('bad' if failure=='checksum' else '2683c0c38f62fd510f86eb62df9aad92a03e865c9a7e42794d50c661d16aafcb')+'  '+args[-1])
+ print(('bad' if failure=='checksum' else 'af912efc57214ed64c2b464275218b3f9d76612f61104d6c8a6c8f881690675d')+'  '+args[-1])
 elif name=='hdiutil':
  if args[0]=='attach':
   if failure=='mount': sys.exit(1)
@@ -37,7 +37,7 @@ elif name=='codesign':
  assert args[args.index('--test-requirement')+1].startswith('=anchor apple generic')
  assert 'K542ZFQH6B' in args[args.index('--test-requirement')+1]
  if failure=='signature': sys.exit(1)
-elif name=='defaults': print('9.9.9' if failure=='version' else '2.1.0')
+elif name=='defaults': print('9.9.9' if failure=='version' else '2.2.0')
 elif name=='spctl':
  if failure=='gatekeeper': sys.exit(1)
 elif name=='ditto':

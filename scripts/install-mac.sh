@@ -6,7 +6,7 @@ verify_transcribe_app() {
     local app="$1"
     local requirement='anchor apple generic and identifier "com.sebastianmarambio.transcribe" and certificate leaf[subject.OU] = "K542ZFQH6B" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
     codesign --verify --deep --strict --test-requirement "=$requirement" "$app"
-    [ "$(defaults read "$app/Contents/Info" CFBundleShortVersionString)" = "2.1.0" ] || { echo 'Unexpected app version.' >&2; return 1; }
+    [ "$(defaults read "$app/Contents/Info" CFBundleShortVersionString)" = "2.2.0" ] || { echo 'Unexpected app version.' >&2; return 1; }
     spctl --assess --type execute "$app"
 }
 
@@ -17,8 +17,8 @@ install_transcribe() (
     system_applications="${2:-/Applications}"
     applications="$user_directory/Applications"
     destination="$applications/Transcribe.app"
-    release='https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg'
-    digest='2683c0c38f62fd510f86eb62df9aad92a03e865c9a7e42794d50c661d16aafcb'
+    release='https://github.com/brainforwarding/transcribe/releases/download/v2.2.0/Transcribe.dmg'
+    digest='af912efc57214ed64c2b464275218b3f9d76612f61104d6c8a6c8f881690675d'
     workspace='' staging=''
 
     cleanup_install() {
@@ -54,7 +54,7 @@ install_transcribe() (
     [ -d "$applications" ] && [ -w "$applications" ] || { echo 'Your Applications folder is not writable.' >&2; exit 1; }
     workspace=$(mktemp -d "${TMPDIR:-/tmp}/transcribe-download.XXXXXX")
     staging=$(mktemp -d "$applications/.transcribe-install.XXXXXX")
-    echo 'Downloading Transcribe 2.1.0…'
+    echo 'Downloading Transcribe 2.2.0…'
     curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 20 --max-time 180 "$release" -o "$workspace/Transcribe.dmg"
     actual_digest=$(shasum -a 256 "$workspace/Transcribe.dmg")
     [ "${actual_digest%% *}" = "$digest" ] || { echo 'Download checksum did not match. Nothing was installed.' >&2; exit 1; }

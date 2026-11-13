@@ -4,7 +4,7 @@ Native macOS dictation and meeting notes, using the Circles interface. Apple Sil
 
 ## Install
 
-[Download Transcribe 2.1.0](https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The installer is signed, notarized and stapled. Public distribution checks are recorded in [the implementation state](../docs/IMPLEMENTATION.md). [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.1.0).
+[Download Transcribe 2.2.0](https://github.com/brainforwarding/transcribe/releases/download/v2.2.0/Transcribe.dmg), open the disk image and drag Transcribe into Applications. The installer is signed, notarized and stapled. Public distribution checks are recorded in [the implementation state](../docs/IMPLEMENTATION.md). [Release notes and checksum](https://github.com/brainforwarding/transcribe/releases/tag/v2.2.0).
 
 ## Run from source
 
@@ -18,16 +18,14 @@ open build/.app-staging.noindex/Transcribe.app
 The app lives in the menu bar. Open Transcribe opens Dictation history. Meetings,
 Dictionary and Settings are available in the sidebar.
 
-### Usability changes in the source checkout
-
-These changes are implemented locally and are not included in the released 2.1.0 download yet.
+### Dock, shortcuts and paste feedback
 
 - Transcribe appears in the Dock and Command–Tab by default. Settings → Show in Dock enables menu-bar-only use when switched off. Closing the window keeps dictation running.
 - Double Option remains available. Settings → Additional shortcut also offers Control–Option–Space (default), Control–Shift–Space, or Off. The selected chord starts and finishes dictation. Fn is unsupported.
 - Setup and Settings share Check dictation. Test shortcut detects your gesture without recording. Then dictate into another app and return to Settings → Check dictation to confirm Text appeared.
 - The floating chip distinguishes Enable Accessibility, Select a text field and Check paste. Hover for the detailed reason. Copy stays available; an unconfirmed paste never retries automatically.
 
-The [installation guide](../docs/INSTALL.md) provides download, Bash and agent instructions. The Bash installer currently installs the signed 2.1.0 release and refuses an existing app in either Applications folder.
+The [installation guide](../docs/INSTALL.md) provides download, Bash and agent instructions. The Bash installer currently installs the signed 2.2.0 release and refuses an existing app in either Applications folder.
 
 ## Connect
 

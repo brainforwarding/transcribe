@@ -476,3 +476,22 @@ remain byte-identical, and Spotlight still reports only `/Applications/Transcrib
 The public default release is 2.1.0 (neither draft nor prerelease), and its signed
 feed announces build 15 with builds 13/12/11 retained. No required release work
 remains; unrelated Figma state and personal Markdown exports were untouched.
+
+## 2026-11-13 · 2.2.0 public release
+
+The owner asked to publish 2.2.0. Source tag `v2.2.0` points to freeze
+`37c8571a2fc8ec8cdbebe408ebc541116e3b7477`, which passed the core selftest, 50
+actual coordinator cases, 113 native checks, 30 updater checks, 15 live-follow
+checks and the Bash installer fixtures. The Team relay was unchanged; it already
+accepts language hints and keywords, so no deployment was needed.
+
+Apple accepted the app (`13fe9963-a110-4dc7-88ed-b9526739bd33`) and DMG
+(`0c010419-b0ea-4620-95df-3e4403827957`). The public
+[2.2.0 release](https://github.com/brainforwarding/transcribe/releases/tag/v2.2.0)
+holds the exact notarized 3,849,407-byte DMG and SHA256SUMS; GitHub's asset digest
+matches `af912efc57214ed64c2b464275218b3f9d76612f61104d6c8a6c8f881690675d`.
+`prepare-appcast.sh` downloaded the public asset, compared its bytes, and generated
+and verified the signed build-20 feed with builds 15/13/12/11 retained. That exact
+XML is `docs/updates/appcast.xml`. Download links, the install guide and the Bash
+installer now pin 2.2.0. Release artifacts are under ignored
+`TranscribeBar/build/.release-2.2.0.noindex/`.

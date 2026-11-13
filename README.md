@@ -1,6 +1,6 @@
 # Transcribe
 
-**[Download Transcribe 2.1.0 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.1.0/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
+**[Download Transcribe 2.2.0 for Mac](https://github.com/brainforwarding/transcribe/releases/download/v2.2.0/Transcribe.dmg)** · Apple Silicon, macOS 13 or later · signed and notarized
 
 Open the download, drag Transcribe to Applications, then open it.
 
